@@ -32,3 +32,6 @@ or if you want to run a single experiment
 ```
 CUDA_VISIBLE_DEVICES=0 python main.py --learner FairDICE --divergence SOFT_CHI --env_name MO-Hopper-v2 --quality expert --beta 0.1 --preference_dist uniform --eval_episodes 10 --batch_size 256 --hidden_dim 768 --num_layers 3 --total_train_steps 100000 --log_interval 1000 --normalize_reward  True
 ```
+
+## License
+This project is licensed under the MIT License.

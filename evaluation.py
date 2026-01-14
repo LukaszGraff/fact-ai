@@ -1,6 +1,7 @@
 from tqdm import tqdm
 import numpy as np
 import jax
+import jax.numpy as jnp
 from utils import normalization, min_max_normalization
 import os
 import wandb
@@ -12,11 +13,22 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
     discounted_raw_returns = []          
     discounted_normalized_returns = []
     
+    # Check if action space is discrete
+    is_discrete = hasattr(config, 'is_discrete') and config.is_discrete
+    
     @jax.jit
     def select_action(observation):
-        dist = policy(observation)
-        action = dist.mean() # deterministic action
-        return action.flatten()
+        output = policy(observation)
+        if is_discrete:
+            # For discrete policies: output is (logits, probs)
+            logits, probs = output
+            action = jnp.argmax(probs, axis=-1)  # deterministic action: greedy
+        else:
+            # For continuous policies: output is a distribution
+            dist = output
+            action = dist.mean()  # deterministic action
+            action = action.flatten()
+        return action
 
     for iter in range(num_episodes):
         env.seed(iter)
@@ -31,7 +43,15 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
         
         while not done and steps < max_steps:
             s_t = normalization(state, config.state_mean, config.state_std)
-            action = (select_action(s_t)* config.ACTION_SCALE + config.ACTION_BIAS).astype(np.float32)
+            action = select_action(s_t)
+            
+            if is_discrete:
+                # For discrete actions, convert to int
+                action = int(action)
+            else:
+                # For continuous actions, apply scaling and bias
+                action = (action * config.ACTION_SCALE + config.ACTION_BIAS).astype(np.float32)
+            
             state, _, done, info= env.step(action)
             
 

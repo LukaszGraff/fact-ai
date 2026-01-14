@@ -2,10 +2,12 @@ from collections import namedtuple
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from policy import GaussianPolicy, MuNetwork
+from policy import GaussianPolicy, DiscretePolicy, MuNetwork
 from critic import Critic
 from divergence import f, FDivergence, f_derivative_inverse
 import orbax.checkpoint as orbax
+import tensorflow_probability.substrates.jax as tfp
+tfd = tfp.distributions
 
 NetworkState = namedtuple('NetworkState', ['graphdef', 'state', 'target_params'])
 TrainState = namedtuple('TrainState', ['policy_state', 'nu_state', 'mu_state', 'step'])
@@ -24,16 +26,29 @@ import optax
 def init_train_state(config) -> TrainState:
     rngs = nnx.Rngs(config.seed)
 
-    policy = GaussianPolicy(
-        input_dim=config.state_dim,
-        hidden_dims=config.hidden_dims,
-        action_dim=config.action_dim,
-        activation=nnx.relu,
-        temperature=config.temperature,
-        tanh_squash_distribution=config.tanh_squash_distribution,
-        rngs=rngs,
-        layer_norm=config.layer_norm
-    )
+    # Check if action space is discrete
+    is_discrete = hasattr(config, 'is_discrete') and config.is_discrete
+    
+    if is_discrete:
+        policy = DiscretePolicy(
+            input_dim=config.state_dim,
+            hidden_dims=config.hidden_dims,
+            action_dim=config.action_dim,
+            activation=nnx.relu,
+            rngs=rngs,
+            layer_norm=config.layer_norm
+        )
+    else:
+        policy = GaussianPolicy(
+            input_dim=config.state_dim,
+            hidden_dims=config.hidden_dims,
+            action_dim=config.action_dim,
+            activation=nnx.relu,
+            temperature=config.temperature,
+            tanh_squash_distribution=config.tanh_squash_distribution,
+            rngs=rngs,
+            layer_norm=config.layer_norm
+        )
     
     policy_tx = optax.chain(
             optax.scale_by_adam(),
@@ -121,9 +136,28 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
     nu_state_ = nnx.state((nu_network, nu_optim))
     mu_state_ = nnx.state((mu_network, mu_optim))
     
+    # Check if action space is discrete
+    is_discrete = hasattr(config, 'is_discrete') and config.is_discrete
+    
     def policy_loss_fn(policy):
-        dist = policy(states)
-        log_probs = dist.log_prob(batch.actions)
+        output = policy(states)
+        
+        if is_discrete:
+            # For discrete policies: output is (logits, probs)
+            logits, probs = output
+            log_probs = jnp.log(probs + 1e-8)  # Add small epsilon for numerical stability
+            # Select log probs for the actions taken
+            actions_int = batch.actions.astype(jnp.int32)
+            log_probs = log_probs[jnp.arange(log_probs.shape[0]), actions_int]
+            # Reshape to match expected shape for loss computation
+            log_probs = log_probs.reshape(-1, 1)
+        else:
+            # For continuous policies: output is a distribution
+            dist = output
+            log_probs = dist.log_prob(batch.actions)
+            if len(log_probs.shape) == 1:
+                log_probs = log_probs.reshape(-1, 1)
+            
         weighted_rewards = (rewards @ mu).reshape(-1, 1)
         nu_val = nu_network(states)
         next_nu = nu_network(next_states)

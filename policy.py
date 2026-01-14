@@ -39,12 +39,14 @@ class MLP(nnx.Module):
 class DiscretePolicy(nnx.Module):
     def __init__(self,
                  input_dim,
-                 hidden_dim,
+                 hidden_dims,
                  action_dim,
-                 rngs: nnx.Rngs = nnx.Rngs(0)):
+                 activation=nnx.relu,
+                 rngs: nnx.Rngs = nnx.Rngs(0),
+                 layer_norm: bool = False):
         
-        self.mlp_layer = MLP(input_dim, hidden_dim, rngs=rngs)
-        self.layer = nnx.Linear(hidden_dim, action_dim, rngs=rngs)
+        self.mlp_layer = MLP(input_dim, hidden_dims[-1], hidden_dims[:-1], activation=activation, rngs=rngs, activate_final=True, layer_norm=layer_norm)
+        self.layer = nnx.Linear(hidden_dims[-1], action_dim, rngs=rngs)
         
 
     def __call__(self, inputs):

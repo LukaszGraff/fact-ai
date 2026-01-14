@@ -1,9 +1,41 @@
 #!/bin/bash
+
+#SBATCH --partition=gpu_mig
+#SBATCH --gpus=1
+#SBATCH --job-name=run_all
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=60:00:00
+#SBATCH --output=logs/slurm/output_%A.out
+
+#SBATCH --ear=on
+#SBATCH --ear-policy=monitoring
+#SBATCH --ear-verbose=1
+
+set -euo pipefail
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd $HOME/fact-ai/FairDICE
+
+source activate fairdice
+
+export MUJOCO_PY_MUJOCO_PATH="$HOME/.mujoco/mujoco210"
+export MUJOCO_GL=egl
+export D4RL_SUPPRESS_IMPORT_ERROR=1
+export LD_LIBRARY_PATH="/usr/lib/nvidia:/usr/lib64/nvidia:$MUJOCO_PY_MUJOCO_PATH/bin:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+
+export CODECARBON_COUNTRY=Netherlands
+export CODECARBON_REGION=Netherlands
+
 export CUDA_VISIBLE_DEVICES=0
 DIST=uniform
 Learner=FairDICE
 Divergence=SOFT_CHI
-for ENV in MO-Hopper-v2 MO-Walker2d-v2 MO-Swimmer-v2 MO-HalfCheetah-v2 MO-Ant-v2 MO-Hopper-v3; do
+# for ENV in MO-Hopper-v2 MO-Walker2d-v2 MO-Swimmer-v2 MO-HalfCheetah-v2 MO-Ant-v2 MO-Hopper-v3; do
+for ENV in MO-Walker2d-v2 MO-Swimmer-v2 MO-HalfCheetah-v2 MO-Ant-v2 MO-Hopper-v3 MO-Hopper-v2; do
     for quality in expert amateur; do
         for beta in 1 0.1 0.01 0.001 0.0001; do
             for seed in 1 2 3 4 5; do
@@ -18,7 +50,7 @@ for ENV in MO-Hopper-v2 MO-Walker2d-v2 MO-Swimmer-v2 MO-HalfCheetah-v2 MO-Ant-v2
                 else
                     hidden_dim=768
                 fi
-                python main.py \
+                python run_with_cc.py \
                     --learner $Learner \
                     --divergence $Divergence \
                     --env_name $ENV \

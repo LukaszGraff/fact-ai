@@ -35,3 +35,9 @@ register(
     entry_point = 'environments.swimmer:SwimmerEnv',
     max_episode_steps=500,
 )
+
+register(
+    id = 'MO-FourRoom-v2',
+    entry_point = 'environments.MO-Four-Room:FourRoomEnv',
+    max_episode_steps=200,
+)

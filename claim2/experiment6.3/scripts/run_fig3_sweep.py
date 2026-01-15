@@ -1,9 +1,9 @@
+import argparse
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 # Ensure src package (one level up) is importable when running as a script
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -12,61 +12,168 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.random_momdp import RandomMOMDP
 from src.dataset import make_behavior_policy_half_optimal, collect_offline_dataset
-from src.occupancy_solvers import empirical_d_dataset, solve_fairdice_nsw, solve_fairdice_fixed
+from src.occupancy_solvers import (
+    empirical_d_dataset,
+    solve_fairdice_nsw,
+    solve_fairdice_fixed,
+    build_transition_tensor,
+    expected_obj_rewards,
+)
 from src.metrics import nsw, mu_from_nsw_opt, perturb_mu
 
+
+def parse_sigmas(arg: str) -> np.ndarray:
+    arg = arg.strip()
+    if arg.startswith("logspace"):
+        parts = arg.split(":")
+        if len(parts) != 4:
+            raise ValueError("logspace format must be logspace:start:stop:num")
+        start, stop, num = float(parts[1]), float(parts[2]), int(parts[3])
+        return np.logspace(start, stop, num)
+    vals = [float(x) for x in arg.split(",") if x.strip()]
+    if not vals:
+        raise ValueError("sigmas specification produced no values")
+    return np.array(vals, dtype=float)
+
+
+def parse_betas(arg: str) -> list:
+    vals = [float(x) for x in arg.split(",") if x.strip()]
+    if not vals:
+        raise ValueError("betas specification produced no values")
+    return vals
+
+
+def ensure_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def make_rng_seed(env_seed: int, beta: float, offset: int) -> int:
+    base = 2026 + 1000 * env_seed + int(round(beta * 1_000_000))
+    return base + offset
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Figure 3 sweep with multi-seed aggregation")
+    parser.add_argument("--seed_start", type=int, default=0)
+    parser.add_argument("--seed_end", type=int, default=99)
+    parser.add_argument("--n_noise", type=int, default=100)
+    parser.add_argument("--sigmas", type=str, default="logspace:-3:0:13")
+    parser.add_argument("--betas", type=str, default="0.001,0.01,0.1,1.0")
+    parser.add_argument("--out_csv", type=str, default="outputs/fig3_raw.csv")
+    parser.add_argument("--out_csv_agg", type=str, default="outputs/fig3_agg.csv")
+    parser.add_argument("--rollout_seed_base", type=int, default=10000)
+    return parser.parse_args()
+
+
 def main():
-    env_seed = 0
-    rollout_seed = 10000
+    args = parse_args()
+    betas = parse_betas(args.betas)
+    sigmas = parse_sigmas(args.sigmas)
+    out_csv = Path(args.out_csv)
+    out_csv_agg = Path(args.out_csv_agg)
+    ensure_parent(out_csv)
+    ensure_parent(out_csv_agg)
 
-    print(f"[setup] Initializing RandomMOMDP with seed={env_seed}")
-    env = RandomMOMDP(seed=env_seed)
-    print("[setup] Building half-optimal behavior policy")
-    pi_b, stats = make_behavior_policy_half_optimal(env)
-    print(f"[setup] Collecting offline dataset with rollout_seed={rollout_seed}")
-    dataset = collect_offline_dataset(env, pi_b, n_traj=100, seed=rollout_seed)
-
-    print("[setup] Computing empirical occupancy measure")
-    dD = empirical_d_dataset(dataset, env.n_states, env.n_actions, env.gamma)
-
-    # In Figure 3, curves correspond to a few beta choices (consistent with paper-style sweeps)
-    betas = [0.001, 0.01, 0.1, 1.0]
-    # x-axis: perturbation magnitude (log scale)
-    sigmas = np.logspace(-3, 0, 13)  # 1e-3 ... 1e0
-
-    n_noise = 20  # average multiple perturb draws per sigma
-    rng = np.random.default_rng(2026)
-
-    print(f"[sweep] Running for betas={betas}")
-    print(f"[sweep] Sigmas range: {sigmas[0]:.3g} to {sigmas[-1]:.3g} with {len(sigmas)} points")
+    print(
+        f"[args] env seeds {args.seed_start}..{args.seed_end}, betas={betas}, "
+        f"sigmas={sigmas}, n_noise={args.n_noise}"
+    )
 
     rows = []
-    for beta in betas:
-        print(f"[beta] Solving FairDICE-NSW for beta={beta}")
-        # solve FairDICE-NSW to get R* then µ*
-        _, R_star = solve_fairdice_nsw(env, dD, beta=beta)
-        mu_star = mu_from_nsw_opt(R_star)
+    for env_seed in range(args.seed_start, args.seed_end + 1):
+        print(f"[seed] Starting env_seed={env_seed}")
+        env = RandomMOMDP(seed=env_seed)
+        pi_b, _ = make_behavior_policy_half_optimal(env)
+        dataset_seed = args.rollout_seed_base + env_seed
+        dataset = collect_offline_dataset(env, pi_b, n_traj=100, seed=dataset_seed)
+        dD = empirical_d_dataset(dataset, env.n_states, env.n_actions, env.gamma)
+        P = build_transition_tensor(env)
+        Rsa = expected_obj_rewards(env, P)
 
-        # IMPORTANT: baseline should be FairDICE-fixed with mu_star
-        _, R_fixed_star = solve_fairdice_fixed(env, dD, beta=beta, mu=mu_star)
-        base = nsw(R_fixed_star)
-        rows.append(dict(beta=beta, sigma=0.0, nsw=base))
+        for beta in betas:
+            print(f"[seed/beta] env_seed={env_seed} beta={beta}")
+            res = solve_fairdice_nsw(env, dD, beta=beta, P=P, Rsa=Rsa)
+            if res[1] is None:
+                print(
+                    f"[warn] Skipping env_seed={env_seed}, beta={beta} due to NSW solver failure"
+                )
+                continue
+            _, R_star = res
+            mu_star = mu_from_nsw_opt(R_star)
 
+            fixed_res = solve_fairdice_fixed(env, dD, beta=beta, mu=mu_star, P=P, Rsa=Rsa)
+            if fixed_res[1] is None:
+                print(
+                    f"[warn] Skipping baseline for env_seed={env_seed}, beta={beta}"
+                )
+                continue
+            _, R_fixed_star = fixed_res
+            base = nsw(R_fixed_star)
+            rows.append(
+                dict(env_seed=env_seed, beta=beta, sigma=0.0, nsw_mean_seed=float(base))
+            )
 
-        for sigma in tqdm(sigmas, desc=f"beta={beta}"):
-            print(f"    [sigma] beta={beta} sigma={float(sigma):.3g} averaging over {n_noise} noises")
-            vals = []
-            for _ in range(n_noise):
-                mu_t = perturb_mu(mu_star, sigma=float(sigma), rng=rng)
-                _, R_lin = solve_fairdice_fixed(env, dD, beta=beta, mu=mu_t)
-                vals.append(nsw(R_lin))
-            rows.append(dict(beta=beta, sigma=float(sigma), nsw=float(np.mean(vals))))
+            for sigma_idx, sigma in enumerate(sigmas):
+                print(
+                    "    [sigma] env_seed=%s beta=%s sigma=%.4g averaging %d draws"
+                    % (env_seed, beta, sigma, args.n_noise)
+                )
+                vals = []
+                rng_seed = make_rng_seed(env_seed, beta, sigma_idx)
+                rng = np.random.default_rng(rng_seed)
+                for _ in range(args.n_noise):
+                    mu_t = perturb_mu(mu_star, sigma=float(sigma), rng=rng)
+                    solved = solve_fairdice_fixed(
+                        env,
+                        dD,
+                        beta=beta,
+                        mu=mu_t,
+                        P=P,
+                        Rsa=Rsa,
+                    )
+                    if solved[1] is None:
+                        continue
+                    _, R_lin = solved
+                    vals.append(nsw(R_lin))
+                if not vals:
+                    print(
+                        f"[warn] No successful solves for env_seed={env_seed}, beta={beta}, sigma={sigma}"
+                    )
+                    continue
+                rows.append(
+                    dict(
+                        env_seed=env_seed,
+                        beta=beta,
+                        sigma=float(sigma),
+                        nsw_mean_seed=float(np.mean(vals)),
+                    )
+                )
 
     df = pd.DataFrame(rows)
-    df.to_csv("outputs/fig3_raw.csv", index=False)
-    print("[results] Sample of aggregated dataframe:")
-    print(df.head())
-    print("[results] Saved outputs/fig3_raw.csv")
+    if df.empty:
+        print("[error] No data collected; exiting without writing CSVs")
+        return
+
+    df.to_csv(out_csv, index=False)
+    print(f"[results] Wrote per-seed results to {out_csv}")
+
+    df_agg = (
+        df.groupby(["beta", "sigma"], as_index=False)
+        .agg(
+            mean_nsw=("nsw_mean_seed", "mean"),
+            std_nsw=("nsw_mean_seed", "std"),
+            n_seeds=("nsw_mean_seed", "count"),
+        )
+    )
+    df_agg["std_nsw"] = df_agg["std_nsw"].fillna(0.0)
+    denom = df_agg["n_seeds"].astype(float).clip(lower=1.0)
+    df_agg["sem_nsw"] = df_agg["std_nsw"] / np.sqrt(denom)
+
+    df_agg.to_csv(out_csv_agg, index=False)
+    print(f"[results] Wrote aggregated results to {out_csv_agg}")
+    print("[results] Aggregated head:")
+    print(df_agg.head())
+
 
 if __name__ == "__main__":
     main()

@@ -41,14 +41,16 @@ def expected_obj_rewards(env, P):
     print("[occupancy.expected_obj_rewards] Finished expected reward tensor")
     return Rsa
 
-def solve_fairdice_fixed(env, dD, beta, mu):
+def solve_fairdice_fixed(env, dD, beta, mu, P=None, Rsa=None):
     """
     Solve: max_d  mu^T R(d) - beta * chi2(d || dD)
     s.t. discounted occupancy flow constraints
     """
     S, A, g = env.n_states, env.n_actions, env.gamma
-    P = build_transition_tensor(env)
-    Rsa = expected_obj_rewards(env, P)  # (S,A,K)
+    if P is None:
+        P = build_transition_tensor(env)
+    if Rsa is None:
+        Rsa = expected_obj_rewards(env, P)  # (S,A,K)
 
     print(
         "[occupancy.solve_fairdice_fixed] Solving FairDICE-fixed with "
@@ -76,23 +78,33 @@ def solve_fairdice_fixed(env, dD, beta, mu):
     obj = cp.Maximize(mu @ R - beta * chi2)
     prob = cp.Problem(obj, constraints)
     prob.solve(solver=cp.SCS, verbose=False)
+    status = prob.status
     print(
         "[occupancy.solve_fairdice_fixed] Solver status="
-        f"{prob.status}, obj={prob.value:.6f}"
+        f"{status}, obj={prob.value:.6f}"
     )
+
+    if status not in {"optimal", "optimal_inaccurate"}:
+        print(
+            "[occupancy.solve_fairdice_fixed] Warning: solver did not converge;"
+            " skipping datapoint"
+        )
+        return None, None
 
     d_star = np.array(d.value, dtype=np.float64)
     R_star = np.array([np.sum(d_star * Rsa[:, :, k]) for k in range(env.n_obj)], dtype=np.float64)
     print("[occupancy.solve_fairdice_fixed] Extraction complete")
     return d_star, R_star
 
-def solve_fairdice_nsw(env, dD, beta, eps=1e-8):
+def solve_fairdice_nsw(env, dD, beta, eps=1e-8, P=None, Rsa=None):
     """
     Solve: max_d  (1/K) sum_k log(R_k(d)+eps) - beta * chi2(d||dD)
     """
     S, A, g = env.n_states, env.n_actions, env.gamma
-    P = build_transition_tensor(env)
-    Rsa = expected_obj_rewards(env, P)
+    if P is None:
+        P = build_transition_tensor(env)
+    if Rsa is None:
+        Rsa = expected_obj_rewards(env, P)
 
     print(f"[occupancy.solve_fairdice_nsw] Solving NSW objective with beta={beta}")
 
@@ -114,10 +126,18 @@ def solve_fairdice_nsw(env, dD, beta, eps=1e-8):
     obj = cp.Maximize(welfare - beta * chi2)
     prob = cp.Problem(obj, constraints)
     prob.solve(solver=cp.SCS, verbose=False)
+    status = prob.status
     print(
         "[occupancy.solve_fairdice_nsw] Solver status="
-        f"{prob.status}, obj={prob.value:.6f}"
+        f"{status}, obj={prob.value:.6f}"
     )
+
+    if status not in {"optimal", "optimal_inaccurate"}:
+        print(
+            "[occupancy.solve_fairdice_nsw] Warning: solver did not converge;"
+            " skipping datapoint"
+        )
+        return None, None
 
     d_star = np.array(d.value, dtype=np.float64)
     R_star = np.array([np.sum(d_star * Rsa[:, :, k]) for k in range(env.n_obj)], dtype=np.float64)

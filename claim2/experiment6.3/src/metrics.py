@@ -5,6 +5,16 @@ def nsw(R, eps=1e-12):
     R = np.maximum(R, eps)
     return float(np.exp(np.mean(np.log(R))))
 
+
+def nsw_log(R, eps=1e-12):
+    R = np.maximum(R, eps)
+    return float(np.mean(np.log(R)))
+
+
+def nsw_log_sum(R, eps=1e-12):
+    R = np.maximum(R, eps)
+    return float(np.sum(np.log(R)))
+
 def mu_from_nsw_opt(R, eps=1e-12):
     R = np.maximum(R, eps)
     mu = 1.0 / R

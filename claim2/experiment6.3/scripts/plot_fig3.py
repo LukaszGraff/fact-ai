@@ -46,7 +46,7 @@ def main() -> None:
 
     plt.xscale("log")
     plt.xlabel("Perturbation on mu* (sigma)")
-    plt.ylabel("NSW")
+    plt.ylabel("sum log NSW")
     plt.legend()
     plt.tight_layout()
     plt.savefig(out_path, dpi=200)

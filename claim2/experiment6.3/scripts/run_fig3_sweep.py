@@ -19,7 +19,7 @@ from src.occupancy_solvers import (
     build_transition_tensor,
     expected_obj_rewards,
 )
-from src.metrics import nsw, mu_from_nsw_opt, perturb_mu
+from src.metrics import nsw_log_sum, perturb_mu
 
 
 def parse_sigmas(arg: str) -> np.ndarray:
@@ -62,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out_csv", type=str, default="outputs/fig3_raw.csv")
     parser.add_argument("--out_csv_agg", type=str, default="outputs/fig3_agg.csv")
     parser.add_argument("--rollout_seed_base", type=int, default=10000)
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose solver logging")
     return parser.parse_args()
 
 
@@ -92,14 +93,20 @@ def main():
 
         for beta in betas:
             print(f"[seed/beta] env_seed={env_seed} beta={beta}")
-            res = solve_fairdice_nsw(env, dD, beta=beta, P=P, Rsa=Rsa)
-            if res[1] is None:
+            res = solve_fairdice_nsw(env, dD, beta=beta, P=P, Rsa=Rsa, verbose=args.verbose)
+            d_star, R_star, mu_star = res
+            if R_star is None or mu_star is None:
                 print(
                     f"[warn] Skipping env_seed={env_seed}, beta={beta} due to NSW solver failure"
                 )
                 continue
-            _, R_star = res
-            mu_star = mu_from_nsw_opt(R_star)
+            mu_sum = float(mu_star.sum())
+            if mu_sum <= 0:
+                print(
+                    f"[warn] Invalid mu_star for env_seed={env_seed}, beta={beta}; skipping"
+                )
+                continue
+            mu_star = mu_star / mu_sum
 
             fixed_res = solve_fairdice_fixed(env, dD, beta=beta, mu=mu_star, P=P, Rsa=Rsa)
             if fixed_res[1] is None:
@@ -108,7 +115,7 @@ def main():
                 )
                 continue
             _, R_fixed_star = fixed_res
-            base = nsw(R_fixed_star)
+            base = nsw_log_sum(R_fixed_star)
             rows.append(
                 dict(env_seed=env_seed, beta=beta, sigma=0.0, nsw_mean_seed=float(base))
             )
@@ -134,7 +141,7 @@ def main():
                     if solved[1] is None:
                         continue
                     _, R_lin = solved
-                    vals.append(nsw(R_lin))
+                    vals.append(nsw_log_sum(R_lin))
                 if not vals:
                     print(
                         f"[warn] No successful solves for env_seed={env_seed}, beta={beta}, sigma={sigma}"

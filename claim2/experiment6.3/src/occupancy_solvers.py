@@ -96,11 +96,13 @@ def solve_fairdice_fixed(env, dD, beta, mu, P=None, Rsa=None):
     print("[occupancy.solve_fairdice_fixed] Extraction complete")
     return d_star, R_star
 
-def solve_fairdice_nsw(env, dD, beta, eps=1e-8, P=None, Rsa=None):
+def solve_fairdice_nsw(env, dD, beta, eps=1e-8, P=None, Rsa=None, verbose=False):
     """
-    Solve: max_d  (1/K) sum_k log(R_k(d)+eps) - beta * chi2(d||dD)
+    Solve: max_d  (1/K) sum_k log(R_k(d)) - beta * chi2(d||dD)
+    Returns discounted occupancy d*, returns R*, and dual-based mu*.
     """
     S, A, g = env.n_states, env.n_actions, env.gamma
+    K = env.n_obj
     if P is None:
         P = build_transition_tensor(env)
     if Rsa is None:
@@ -109,20 +111,28 @@ def solve_fairdice_nsw(env, dD, beta, eps=1e-8, P=None, Rsa=None):
     print(f"[occupancy.solve_fairdice_nsw] Solving NSW objective with beta={beta}")
 
     d = cp.Variable((S, A), nonneg=True)
+    k = cp.Variable(K)
     rho = cp.sum(d, axis=1)
     init = np.zeros(S); init[env.init_state] = 1.0
     inflow = cp.sum(cp.sum(cp.multiply(d[:, :, None], P), axis=0), axis=0)
     constraints = [
         rho == (1 - g) * init + g * inflow,
-        cp.sum(d) == 1.0
+        cp.sum(d) == 1.0,
+        k >= eps,
     ]
 
     R = cp.sum(cp.sum(cp.multiply(d[:, :, None], Rsa), axis=0), axis=0)
 
+    return_constraints = []
+    for idx in range(K):
+        c = R[idx] == k[idx]
+        constraints.append(c)
+        return_constraints.append(c)
+
     ratio = cp.multiply(d, 1.0 / dD)
     chi2 = 0.5 * cp.sum(cp.multiply(dD, cp.square(ratio - 1.0)))
 
-    welfare = (1.0 / env.n_obj) * cp.sum(cp.log(R + eps))
+    welfare = (1.0 / K) * cp.sum(cp.log(k))
     obj = cp.Maximize(welfare - beta * chi2)
     prob = cp.Problem(obj, constraints)
     prob.solve(solver=cp.SCS, verbose=False)
@@ -137,9 +147,32 @@ def solve_fairdice_nsw(env, dD, beta, eps=1e-8, P=None, Rsa=None):
             "[occupancy.solve_fairdice_nsw] Warning: solver did not converge;"
             " skipping datapoint"
         )
-        return None, None
+        return None, None, None
 
     d_star = np.array(d.value, dtype=np.float64)
     R_star = np.array([np.sum(d_star * Rsa[:, :, k]) for k in range(env.n_obj)], dtype=np.float64)
+    mu = np.zeros(K, dtype=np.float64)
+    for idx, c in enumerate(return_constraints):
+        dual_val = c.dual_value
+        if dual_val is None:
+            mu[idx] = 0.0
+        else:
+            mu[idx] = float(np.array(dual_val).squeeze())
+    if np.mean(mu) < 0:
+        mu = -mu
+    mu = np.maximum(mu, 1e-12)
+
+    if verbose:
+        mu_norm = mu / mu.sum() if mu.sum() > 0 else mu
+        inv = 1.0 / np.maximum(R_star, eps)
+        inv /= inv.sum()
+        print("[occupancy.solve_fairdice_nsw] R*=", np.round(R_star, 6))
+        print(
+            "[occupancy.solve_fairdice_nsw] mu_norm=",
+            np.round(mu_norm, 6),
+            " | (1/R)_norm=",
+            np.round(inv, 6),
+        )
+
     print("[occupancy.solve_fairdice_nsw] Extraction complete")
-    return d_star, R_star
+    return d_star, R_star, mu

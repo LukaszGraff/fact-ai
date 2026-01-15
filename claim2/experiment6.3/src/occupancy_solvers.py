@@ -2,6 +2,16 @@ import numpy as np
 import cvxpy as cp
 
 
+def _discounted_returns_expr(d_var, Rsa, scale):
+    return scale * cp.sum(cp.sum(cp.multiply(d_var[:, :, None], Rsa), axis=0), axis=0)
+
+
+def _discounted_returns_numpy(d_arr, Rsa, scale):
+    return scale * np.array([
+        np.sum(d_arr * Rsa[:, :, k]) for k in range(Rsa.shape[2])
+    ], dtype=np.float64)
+
+
 def empirical_d_dataset(dataset, n_states, n_actions, gamma):
     # discounted occupancy estimate from trajectories
     # weight each transition by (1-gamma)*gamma^t so it sums ~1
@@ -47,6 +57,8 @@ def solve_fairdice_fixed(env, dD, beta, mu, P=None, Rsa=None):
     s.t. discounted occupancy flow constraints
     """
     S, A, g = env.n_states, env.n_actions, env.gamma
+    assert 0.0 < g < 1.0
+    scale = 1.0 / (1.0 - g)
     if P is None:
         P = build_transition_tensor(env)
     if Rsa is None:
@@ -69,7 +81,7 @@ def solve_fairdice_fixed(env, dD, beta, mu, P=None, Rsa=None):
     ]
 
     # returns per objective
-    R = cp.sum(cp.sum(cp.multiply(d[:, :, None], Rsa), axis=0), axis=0)  # (K,)
+    R = _discounted_returns_expr(d, Rsa, scale)
 
     # chi2 divergence term: sum dD * 0.5 * ((d/dD)-1)^2
     ratio = cp.multiply(d, 1.0 / dD)
@@ -92,7 +104,8 @@ def solve_fairdice_fixed(env, dD, beta, mu, P=None, Rsa=None):
         return None, None
 
     d_star = np.array(d.value, dtype=np.float64)
-    R_star = np.array([np.sum(d_star * Rsa[:, :, k]) for k in range(env.n_obj)], dtype=np.float64)
+    R_star = _discounted_returns_numpy(d_star, Rsa, scale)
+    assert np.isfinite(R_star).all()
     print("[occupancy.solve_fairdice_fixed] Extraction complete")
     return d_star, R_star
 
@@ -102,6 +115,8 @@ def solve_fairdice_nsw(env, dD, beta, eps=1e-8, P=None, Rsa=None, verbose=False)
     Returns discounted occupancy d*, returns R*, and dual-based mu*.
     """
     S, A, g = env.n_states, env.n_actions, env.gamma
+    assert 0.0 < g < 1.0
+    scale = 1.0 / (1.0 - g)
     K = env.n_obj
     if P is None:
         P = build_transition_tensor(env)
@@ -121,7 +136,7 @@ def solve_fairdice_nsw(env, dD, beta, eps=1e-8, P=None, Rsa=None, verbose=False)
         k >= eps,
     ]
 
-    R = cp.sum(cp.sum(cp.multiply(d[:, :, None], Rsa), axis=0), axis=0)
+    R = _discounted_returns_expr(d, Rsa, scale)
 
     return_constraints = []
     for idx in range(K):
@@ -150,7 +165,8 @@ def solve_fairdice_nsw(env, dD, beta, eps=1e-8, P=None, Rsa=None, verbose=False)
         return None, None, None
 
     d_star = np.array(d.value, dtype=np.float64)
-    R_star = np.array([np.sum(d_star * Rsa[:, :, k]) for k in range(env.n_obj)], dtype=np.float64)
+    R_star = _discounted_returns_numpy(d_star, Rsa, scale)
+    assert np.isfinite(R_star).all()
     mu = np.zeros(K, dtype=np.float64)
     for idx, c in enumerate(return_constraints):
         dual_val = c.dual_value

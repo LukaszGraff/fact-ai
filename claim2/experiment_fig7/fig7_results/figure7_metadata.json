@@ -1,0 +1,32 @@
+{
+  "env_name": "MO-FourRoom-v2",
+  "quality": "expert",
+  "preference_dist": "uniform",
+  "beta": 0.01,
+  "divergence": "CHI",
+  "total_train_steps": 20000,
+  "log_interval": 10000,
+  "seed": 0,
+  "grid": [
+    -0.10000000149011612,
+    0.0,
+    0.10000000149011612
+  ],
+  "mu_star": [
+    1.9659628868103027,
+    6.47654914855957,
+    6.47654914855957
+  ],
+  "base_avg_returns": [
+    86.76000213623047,
+    0.0,
+    0.0
+  ],
+  "base_metrics": {
+    "nsw": -32.37821577732376,
+    "utilitarian": 86.76000213623047,
+    "jain": 0.3333333333333333
+  },
+  "figure_png": "fig7_results\\figure7_replication.png",
+  "figure_pdf": "fig7_results\\figure7_replication.pdf"
+}

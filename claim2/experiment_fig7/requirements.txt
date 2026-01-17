@@ -1,0 +1,11 @@
+numpy>=2.0
+pandas>=2.0
+matplotlib>=3.8
+tqdm>=4.66
+gymnasium>=0.29
+jax>=0.8.0
+jaxlib>=0.8.0
+flax>=0.7.5
+optax>=0.2.2
+orbax-checkpoint>=0.5.0
+wandb>=0.16

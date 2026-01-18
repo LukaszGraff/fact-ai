@@ -6,9 +6,11 @@ except ModuleNotFoundError:
 import pickle
 import os
 from tqdm import tqdm
+from fourroom_registration import ensure_fourroom_registered
 
 def generate_offline_data(env_name, num_trajectories=300, quality='amateur', preference_dist='uniform', max_steps=200):
     """Generate offline dataset by running random policy."""
+    ensure_fourroom_registered()
     env = gym.make(env_name)
     
     trajectories = []

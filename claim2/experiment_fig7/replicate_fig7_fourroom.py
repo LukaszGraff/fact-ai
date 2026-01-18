@@ -51,14 +51,21 @@ def parse_args():
     parser.add_argument("--save_root", type=str, default="./fig7_runs", help="Directory for individual training runs")
     parser.add_argument("--output_dir", type=str, default="./fig7_results", help="Directory for aggregated outputs")
     parser.add_argument("--tag", type=str, default="fig7", help="Tag for naming runs")
+    parser.add_argument(
+        "--regen_data",
+        action="store_true",
+        help="Regenerate offline data even if the dataset file already exists",
+    )
     return parser.parse_args()
 
 
-def ensure_dataset(env_name: str, quality: str, preference: str):
+def ensure_dataset(env_name: str, quality: str, preference: str, regen: bool = False):
     data_path = Path("data") / env_name / f"{env_name}_50000_{quality}_{preference}.pkl"
-    if data_path.exists():
+    if data_path.exists() and not regen:
         return str(data_path)
     ensure_fourroom_registered()
+    if data_path.exists():
+        data_path.unlink()
     print(f"Dataset missing ({data_path}). Generating with random policy...")
     generate_offline_data(env_name, num_trajectories=300, quality=quality, preference_dist=preference)
     return str(data_path)
@@ -112,7 +119,7 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    ensure_dataset(args.env_name, args.quality, args.preference_dist)
+    ensure_dataset(args.env_name, args.quality, args.preference_dist, regen=args.regen_data)
 
     grid_values = np.array([float(x) for x in args.grid.split(",")], dtype=np.float32)
     if np.any(np.abs(grid_values) > 1.0):

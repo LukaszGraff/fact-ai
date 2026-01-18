@@ -7,10 +7,13 @@ from gym import spaces
 from os import path
 
 class FourRoomEnv(gym.Env):
-    def __init__(self):
+    def __init__(self, *, horizontal_wall_y=6, horizontal_wall_thickness=1, slip_prob=0.1):
         self.grid_size = 13
         self.np_random = np.random.RandomState()
         self.agent_start = (2, 2)
+        self.horizontal_wall_y = horizontal_wall_y
+        self.horizontal_wall_thickness = horizontal_wall_thickness
+        self.slip_prob = slip_prob
         self.walls = self._create_walls()
         self.agent_pos = self.agent_start
         self.action_space = gym.spaces.Discrete(4)  # up, down, left, right
@@ -49,12 +52,9 @@ class FourRoomEnv(gym.Env):
         for x in range(1, self.grid_size - 1):
             if x == 3 or x == 9:
                 continue
-            walls.add((x, 6))
-        
-        for x in range(1, self.grid_size - 1):
-            if x == 3 or x == 9:
-                continue
-            walls.add((x, 7))
+            walls.add((x, self.horizontal_wall_y))
+            if self.horizontal_wall_thickness == 2:
+                walls.add((x, self.horizontal_wall_y + 1))
         return walls
     
     def _neighbors(self, cell):
@@ -90,8 +90,7 @@ class FourRoomEnv(gym.Env):
         # actions: 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT
         
         # stochastic transitions
-        if self.np_random.rand() < 0.1:
-            action = self.np_random.randint(0, 4)
+        action = self._apply_slip(action)
 
         new_pos = self._get_next_pos(self.agent_pos, action)
         
@@ -101,14 +100,17 @@ class FourRoomEnv(gym.Env):
         
         self.agent_pos = new_pos
         
-        # check for rewards
+        # check for rewards (first time only) and terminate upon reaching a goal
         reward = np.zeros(self.num_objectives, dtype=np.float32)
+        terminated = False
         for i, goal in enumerate(self.goals):
-            if self.agent_pos == goal:
+            if self.agent_pos == goal and goal not in self.visited:
                 reward[i] = 1.0
+                self.visited.add(goal)
+                terminated = True
+                break
 
         self.step_count += 1
-        terminated = False
         truncated = self.step_count >= self.max_steps
         obs = np.array(self.agent_pos)
         info = {'obj': reward}
@@ -129,6 +131,14 @@ class FourRoomEnv(gym.Env):
         elif action == 3:  # RIGHT
             x = min(self.grid_size - 1, x + 1)
         return (x, y)
+
+    def _apply_slip(self, intended_action):
+        if self.np_random.rand() < self.slip_prob:
+            other_actions = [a for a in range(self.action_space.n) if a != intended_action]
+            slipped_action = self.np_random.choice(other_actions)
+            assert slipped_action != intended_action
+            return slipped_action
+        return intended_action
 
     def reset(self, *, seed=None, options=None):
         if seed is not None:

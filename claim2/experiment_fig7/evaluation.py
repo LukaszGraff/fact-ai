@@ -35,12 +35,12 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
     is_discrete = hasattr(config, 'is_discrete') and config.is_discrete
     
     @jax.jit
-    def select_action(observation):
+    def select_action(observation, rng):
         output = policy(observation)
         if is_discrete:
             # For discrete policies: output is (logits, probs)
-            logits, probs = output
-            action = jnp.argmax(probs, axis=-1)  # deterministic action: greedy
+            logits, _ = output
+            action = jax.random.categorical(rng, logits, axis=-1)
         else:
             # For continuous policies: output is a distribution
             dist = output
@@ -48,6 +48,7 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
             action = action.flatten()
         return action
 
+    steps_list = []
     for iter in range(num_episodes):
         try:
             env.seed(iter)
@@ -62,11 +63,11 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
         normalized_rewards_list = []
         discounted_raw_rewards_list = []
         discounted_normalized_rewards_list = []
-        steps_list = []
         
         while not done and steps < max_steps:
             s_t = normalization(state, config.state_mean, config.state_std)
-            action = select_action(s_t)
+            key, subkey = jax.random.split(key)
+            action = select_action(s_t, subkey)
             
             if is_discrete:
                 # For discrete actions, convert to int
@@ -104,10 +105,13 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
     avg_discounted_raw_returns = np.mean(discounted_raw_returns, axis=0)
     avg_discounted_normalized_returns = np.mean(discounted_normalized_returns, axis=0)
     avg_steps = np.mean(steps_list)
-    avg_raw_nsw_score = np.mean(np.sum(np.log(raw_returns), axis=1))
-    avg_normalized_nsw_score = np.mean(np.sum(np.log(normalized_returns), axis=1))
-    avg_discounted_raw_nsw_score = np.mean(np.sum(np.log(discounted_raw_returns), axis=1))
-    avg_discounted_normalized_nsw_score = np.mean(np.sum(np.log(discounted_normalized_returns), axis=1))
+    eps = 1e-8
+    avg_raw_nsw_score = np.mean(np.sum(np.log(np.clip(raw_returns, eps, None)), axis=1))
+    avg_normalized_nsw_score = np.mean(np.sum(np.log(np.clip(normalized_returns, eps, None)), axis=1))
+    avg_discounted_raw_nsw_score = np.mean(np.sum(np.log(np.clip(discounted_raw_returns, eps, None)), axis=1))
+    avg_discounted_normalized_nsw_score = np.mean(
+        np.sum(np.log(np.clip(discounted_normalized_returns, eps, None)), axis=1)
+    )
     avg_raw_usw_score = np.mean(np.sum(raw_returns, axis=1))
     avg_normalized_usw_score = np.mean(np.sum(normalized_returns, axis=1))
     avg_raw_discounted_usw_score = np.mean(np.sum(discounted_raw_returns, axis=1))

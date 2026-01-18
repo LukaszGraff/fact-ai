@@ -37,6 +37,15 @@ from evaluation import evaluate_policy
 from fourroom_registration import ensure_fourroom_registered
 from utils import min_max_normalization, normalization
 
+def _pytree_l2_norm(pytree):
+    leaves = jax.tree_util.tree_leaves(pytree)
+    if not leaves:
+        return 0.0
+    total = 0.0
+    for leaf in leaves:
+        total += float(jnp.sum(jnp.square(leaf)))
+    return float(np.sqrt(total))
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -313,14 +322,31 @@ def train_step_fixed_mu(config, train_state: TrainState, batch, key: jax.random.
         nu_val = nu_network(states)
         next_nu = nu_network(next_states)
         e_val = weighted_rewards + gamma * next_nu - nu_val
-        stable_w = jax.lax.stop_gradient(
-            jax.nn.relu(f_derivative_inverse((e_val - jnp.max(e_val)) / beta, f_divergence))
+        # No max-shift; avoids zeroing weights.
+        stable_w_pre = jax.lax.stop_gradient(
+            jax.nn.relu(f_derivative_inverse(e_val / beta, f_divergence))
         )
-        stable_w = stable_w / (jnp.mean(stable_w) + 1e-8)
+        stable_w_mean_before_norm = jnp.mean(stable_w_pre)
+        stable_w_pct_nonzero = jnp.mean(stable_w_pre > 0)
+        stable_w = stable_w_pre / (stable_w_mean_before_norm + 1e-8)
         policy_loss = -(mask * stable_w * log_probs).sum() / (jnp.sum(mask) + 1e-8)
-        return policy_loss, log_probs
+        actor_stats = {
+            "e_val_mean": jnp.mean(e_val),
+            "e_val_std": jnp.std(e_val),
+            "e_val_min": jnp.min(e_val),
+            "e_val_max": jnp.max(e_val),
+            "stable_w_mean": jnp.mean(stable_w),
+            "stable_w_std": jnp.std(stable_w),
+            "stable_w_min": jnp.min(stable_w),
+            "stable_w_max": jnp.max(stable_w),
+            "stable_w_pct_nonzero": stable_w_pct_nonzero,
+            "stable_w_mean_before_norm": stable_w_mean_before_norm,
+        }
+        return policy_loss, (log_probs, actor_stats)
 
-    (policy_loss, _), policy_grads = nnx.value_and_grad(policy_loss_fn, has_aux=True)(policy)
+    (policy_loss, (_, actor_stats)), policy_grads = nnx.value_and_grad(
+        policy_loss_fn, has_aux=True
+    )(policy)
     policy_optim.update(policy, policy_grads)
     policy_state_ = nnx.state((policy, policy_optim))
 
@@ -330,21 +356,55 @@ def train_step_fixed_mu(config, train_state: TrainState, batch, key: jax.random.
         step=step + 1,
     )
 
-    return train_state, {
+    update_info = {
         "policy_loss": policy_loss,
         "nu_loss": nu_loss,
         "mu": mu,
         "grad_penalty": grad_penalty,
     }
+    update_info.update(actor_stats)
+    return train_state, update_info
 
 
 def run_training(config: SimpleNamespace):
     ensure_fourroom_registered()
+    try:
+        FDivergence[config.divergence]
+    except KeyError as exc:
+        raise ValueError(f"Unknown divergence: {config.divergence}") from exc
+    print(f"[main_fourroom] Using divergence: {config.divergence}")
+    print(
+        "[config] "
+        f"env={config.env_name} divergence={config.divergence} beta={config.beta} "
+        f"gamma={config.gamma} deterministic_eval={getattr(config, 'deterministic_eval', True)} "
+        f"eval_episodes={config.eval_episodes} "
+        f"train_eval_episodes={getattr(config, 'train_eval_episodes', config.eval_episodes)} "
+        f"log_interval={config.log_interval} total_train_steps={config.total_train_steps} "
+        f"eval_mode={getattr(config, 'eval_mode', 'greedy')} "
+        f"eval_seed={getattr(config, 'eval_seed', None)}"
+    )
     data_path = _ensure_dataset(config)
+    mtime = datetime.fromtimestamp(os.path.getmtime(data_path)).isoformat(timespec="seconds")
+    print(f"[dataset] path={data_path} mtime={mtime}")
 
     with open(data_path, "rb") as f:
         trajs = pickle.load(f)
         print(f"Loaded {len(trajs)} trajectories from {data_path}")
+    traj_lengths = [len(traj["observations"]) for traj in trajs]
+    avg_len = float(np.mean(traj_lengths)) if traj_lengths else 0.0
+    traj_goal_hits = 0
+    per_goal_traj_hits = np.zeros(3, dtype=np.int32)
+    for traj in trajs:
+        rewards = np.asarray(traj["raw_rewards"])
+        if (rewards.sum(axis=1) > 0).any():
+            traj_goal_hits += 1
+            per_goal_traj_hits += (rewards.sum(axis=0) > 0).astype(np.int32)
+    print(
+        "[dataset] "
+        f"avg_traj_len={avg_len:.1f} "
+        f"traj_goal_hits={traj_goal_hits} "
+        f"per_goal_traj_hits={per_goal_traj_hits.tolist()}"
+    )
 
     env = gym.make(config.env_name)
     config.state_dim = env.observation_space.shape[0]
@@ -360,6 +420,19 @@ def run_training(config: SimpleNamespace):
     config.state_std = all_states.std(axis=0) + 1e-8
     config.ACTION_SCALE = 1.0
     config.ACTION_BIAS = 0.0
+    probe_states = []
+    try:
+        reset_out = env.reset(seed=0)
+        start_state = reset_out[0] if isinstance(reset_out, tuple) else reset_out
+        probe_states.append(("start", np.array(start_state)))
+    except Exception:
+        pass
+    goals = getattr(env, "goals", None)
+    if goals is None and hasattr(env, "unwrapped"):
+        goals = getattr(env.unwrapped, "goals", None)
+    if goals:
+        for idx, goal in enumerate(goals):
+            probe_states.append((f"goal{idx + 1}", np.array(goal)))
 
     reward_min, reward_max = _reward_statistics(trajs)
     config.reward_min = reward_min
@@ -412,6 +485,10 @@ def run_training(config: SimpleNamespace):
     if train_iterations <= 0:
         raise ValueError("log_interval must be <= total_train_steps and non-zero")
 
+    best_score = None
+    best_train_state = None
+    best_metrics = None
+
     for iter_idx in tqdm(range(train_iterations), desc="Training ..."):
         train_state, key = train_carry
 
@@ -427,15 +504,112 @@ def run_training(config: SimpleNamespace):
         policy = get_model(train_state.policy_state)[0]
 
         step = (iter_idx + 1) * config.log_interval
-        raw_returns, normalized_returns = evaluate_policy(
-            config,
-            policy,
-            env,
-            os.path.join(save_dir, "eval"),
-            num_episodes=config.eval_episodes,
-            max_steps=config.max_seq_len,
-            t_env=step,
+        policy_params = train_state.policy_state.state.filter(nnx.Param)
+        nu_params = train_state.nu_state.state.filter(nnx.Param)
+        mu_vector = _current_mu(train_state)
+        print(
+            "[params] "
+            f"policy_l2={_pytree_l2_norm(policy_params):.4f} "
+            f"critic_l2={_pytree_l2_norm(nu_params):.4f} "
+            f"mu={np.round(mu_vector, 4)}"
         )
+        if probe_states:
+            for label, probe_state in probe_states:
+                probe_norm = normalization(probe_state, config.state_mean, config.state_std)
+                logits, probs = policy(jnp.asarray(probe_norm))
+                probs_np = np.asarray(probs)
+                probs_flat = probs_np.reshape(-1)
+                argmax_action = int(np.argmax(probs_flat))
+                print(
+                    f"[probe] {label} probs={np.round(probs_flat, 3).tolist()} "
+                    f"argmax={argmax_action}"
+                )
+        if "stable_w_mean" in update_info:
+            def _last_val(x):
+                return float(np.asarray(x[-1]))
+            print(
+                "[actor stats] "
+                f"e_val mean={_last_val(update_info['e_val_mean']):.4f} "
+                f"std={_last_val(update_info['e_val_std']):.4f} "
+                f"min={_last_val(update_info['e_val_min']):.4f} "
+                f"max={_last_val(update_info['e_val_max']):.4f} | "
+                f"stable_w mean={_last_val(update_info['stable_w_mean']):.4f} "
+                f"std={_last_val(update_info['stable_w_std']):.4f} "
+                f"min={_last_val(update_info['stable_w_min']):.4f} "
+                f"max={_last_val(update_info['stable_w_max']):.4f} | "
+                f"pct_nonzero={_last_val(update_info['stable_w_pct_nonzero']):.4f}"
+            )
+        if "policy_loss" in update_info:
+            def _last_arr(x):
+                return np.asarray(x[-1])
+            policy_loss_val = _last_val(update_info["policy_loss"])
+            nu_loss_val = _last_val(update_info["nu_loss"])
+            grad_penalty_val = _last_val(update_info["grad_penalty"])
+            mu_vec = _last_arr(update_info["mu"])
+            mu_grad_vec = _last_arr(update_info.get("mu_grad", np.zeros_like(mu_vec)))
+            sample_batch = buffer.sample(jax.random.PRNGKey(int(step)), min(config.batch_size, 256))
+            sample_states = sample_batch.states
+            logits, probs = policy(sample_states)
+            mean_probs = np.asarray(probs).mean(axis=0)
+            print(f"Policy Loss: {policy_loss_val:.6f}")
+            print(f"  Nu Loss: {nu_loss_val:.6f}")
+            print(f"  Mu: {np.round(mu_vec, 6)}")
+            print(f"  Mu grad: {np.round(mu_grad_vec, 6)}")
+            print(f"  Grad Penalty: {grad_penalty_val:.6f}")
+            print(f"  Policy action probs: {np.round(mean_probs, 8)}")
+        eval_mode = getattr(config, "eval_mode", "greedy")
+        eval_seed = getattr(config, "eval_seed", None)
+        if eval_mode == "both":
+            print("[eval] mode=greedy")
+            _, _, metrics_greedy = evaluate_policy(
+                config,
+                policy,
+                env,
+                os.path.join(save_dir, "eval"),
+                num_episodes=config.eval_episodes,
+                max_steps=config.max_seq_len,
+                t_env=step,
+                eval_mode="greedy",
+                eval_seed=eval_seed,
+            )
+            print("[eval] mode=sample")
+            _, _, metrics_sample = evaluate_policy(
+                config,
+                policy,
+                env,
+                os.path.join(save_dir, "eval"),
+                num_episodes=config.eval_episodes,
+                max_steps=config.max_seq_len,
+                t_env=step,
+                eval_mode="sample",
+                eval_seed=eval_seed,
+            )
+            metrics = metrics_sample
+            print(f"[mu] current={np.round(mu_vector, 6)}")
+        else:
+            _, _, metrics = evaluate_policy(
+                config,
+                policy,
+                env,
+                os.path.join(save_dir, "eval"),
+                num_episodes=config.eval_episodes,
+                max_steps=config.max_seq_len,
+                t_env=step,
+                eval_mode=eval_mode,
+                eval_seed=eval_seed,
+            )
+            print(f"[mu] current={np.round(mu_vector, 6)}")
+
+        candidate_score = (
+            float(metrics["avg_discounted_normalized_nsw_score"]),
+            float(metrics["goal_hit_rate"]),
+            float(metrics["avg_raw_discounted_usw_score"]),
+        )
+        if best_score is None or candidate_score > best_score:
+            best_score = candidate_score
+            best_train_state = train_state
+            best_metrics = metrics
+            print(f"[best] mu={np.round(mu_vector, 6)} score={best_score}")
 
         if config.wandb:
             for k, value in update_info.items():
@@ -448,14 +622,15 @@ def run_training(config: SimpleNamespace):
     if config.wandb:
         wandb.finish()
 
-    final_policy = get_model(train_state.policy_state)[0]
-    mu_vector = _current_mu(train_state)
+    final_state = best_train_state if best_train_state is not None else train_state
+    final_policy = get_model(final_state.policy_state)[0]
+    mu_vector = _current_mu(final_state)
     mu_save_path = os.path.join(save_dir, "mu_star.npy")
     np.save(mu_save_path, mu_vector)
     print(f"mu*: {mu_vector}")
 
     if config.save_path:
-        save_model(train_state, os.path.abspath(os.path.join(save_dir, "model")))
+        save_model(final_state, os.path.abspath(os.path.join(save_dir, "model")))
 
     env.close()
     print(f"Training complete. Results saved to {save_dir}")

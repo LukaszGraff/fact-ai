@@ -1,13 +1,15 @@
 from flax import nnx
 import jax.numpy as jnp
+import jax
 
 class MuNetwork(nnx.Module):
-    def __init__(self,
-                 config):
-        self.mu = nnx.Param(jnp.full((config.reward_dim,), 1.0))
+    def __init__(self, config):
+        key = jax.random.PRNGKey(config.seed + 999)
+        init_values = jax.random.uniform(key, (config.reward_dim,), minval=-0.5, maxval=0.5)
+        self.mu_raw = nnx.Param(init_values)
         
     def __call__(self):
-        return self.mu * 1.0
+        return jax.nn.softplus(self.mu_raw) + 0.1
 
 class MLP(nnx.Module):
     def __init__(self, din, dout = 1, hidden_dims = [256, 256], activation = nnx.relu, rngs: nnx.Rngs = nnx.Rngs(0), activate_final: bool = False, dropout_rate: float = 0.0, layer_norm: bool = False):

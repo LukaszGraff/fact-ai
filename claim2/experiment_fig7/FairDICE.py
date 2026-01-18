@@ -74,7 +74,7 @@ def init_train_state(config) -> TrainState:
     (nu_gd, nu_state) = nnx.split((nu, nu_optim))
     
     mu = MuNetwork(config)
-    mu_optim = nnx.Optimizer(mu, optax.adam(learning_rate=config.mu_lr), wrt=nnx.Param)
+    mu_optim = nnx.Optimizer(mu, optax.adam(learning_rate=config.mu_lr * 0.1), wrt=nnx.Param)
     (mu_gd, mu_state) = nnx.split((mu, mu_optim))
     
     nu_target = nu_state.filter(nnx.Param)
@@ -167,14 +167,31 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
         nu_val = nu_network(states)
         next_nu = nu_network(next_states)
         e_val = (weighted_rewards + gamma * next_nu - nu_val)
-        stable_w = jax.lax.stop_gradient(
-            jax.nn.relu(f_derivative_inverse((e_val - jnp.max(e_val))/ beta, f_divergence))
+        # No max-shift; avoids zeroing weights.
+        stable_w_pre = jax.lax.stop_gradient(
+            jax.nn.relu(f_derivative_inverse(e_val / beta, f_divergence))
         )
-        stable_w = stable_w / (jnp.mean(stable_w) + 1e-8)
+        stable_w_mean_before_norm = jnp.mean(stable_w_pre)
+        stable_w_pct_nonzero = jnp.mean(stable_w_pre > 0)
+        stable_w = stable_w_pre / (stable_w_mean_before_norm + 1e-8)
         policy_loss = -(mask * stable_w * log_probs).sum() / (jnp.sum(mask) + 1e-8)
-        return policy_loss, log_probs
+        actor_stats = {
+            "e_val_mean": jnp.mean(e_val),
+            "e_val_std": jnp.std(e_val),
+            "e_val_min": jnp.min(e_val),
+            "e_val_max": jnp.max(e_val),
+            "stable_w_mean": jnp.mean(stable_w),
+            "stable_w_std": jnp.std(stable_w),
+            "stable_w_min": jnp.min(stable_w),
+            "stable_w_max": jnp.max(stable_w),
+            "stable_w_pct_nonzero": stable_w_pct_nonzero,
+            "stable_w_mean_before_norm": stable_w_mean_before_norm,
+        }
+        return policy_loss, (log_probs, actor_stats)
         
-    (policy_loss, log_probs), policy_grads= nnx.value_and_grad(policy_loss_fn, has_aux=True)(policy)
+    (policy_loss, (log_probs, actor_stats)), policy_grads = nnx.value_and_grad(
+        policy_loss_fn, has_aux=True
+    )(policy)
     policy_optim.update(policy, policy_grads)
     policy_state_ = nnx.state((policy, policy_optim))
 
@@ -189,12 +206,17 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
         step = step + 1,
     )
     
-    return train_state, {
+    mu_grad_leaves = jax.tree_util.tree_leaves(mu_grads)
+    mu_grad_vec = mu_grad_leaves[0] if mu_grad_leaves else jnp.zeros_like(mu)
+    update_info = {
         "policy_loss": policy_loss,
         "nu_loss": nu_loss,
         "mu": mu,
+        "mu_grad": mu_grad_vec,
         "grad_penalty": grad_penalty,
     }
+    update_info.update(actor_stats)
+    return train_state, update_info
     
 def save_model(train_state: TrainState, path: str):
     checkpointer = orbax.PyTreeCheckpointer()

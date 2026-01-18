@@ -506,7 +506,10 @@ def run_training(config: SimpleNamespace):
         step = (iter_idx + 1) * config.log_interval
         policy_params = train_state.policy_state.state.filter(nnx.Param)
         nu_params = train_state.nu_state.state.filter(nnx.Param)
-        mu_vector = _current_mu(train_state)
+        if config.learner == "FairDICEFixed" and getattr(config, "mu_fixed_vector", None) is not None:
+            mu_vector = np.array(config.mu_fixed_vector, dtype=np.float32)
+        else:
+            mu_vector = _current_mu(train_state)
         print(
             "[params] "
             f"policy_l2={_pytree_l2_norm(policy_params):.4f} "
@@ -624,7 +627,10 @@ def run_training(config: SimpleNamespace):
 
     final_state = best_train_state if best_train_state is not None else train_state
     final_policy = get_model(final_state.policy_state)[0]
-    mu_vector = _current_mu(final_state)
+    if config.learner == "FairDICEFixed" and getattr(config, "mu_fixed_vector", None) is not None:
+        mu_vector = np.array(config.mu_fixed_vector, dtype=np.float32)
+    else:
+        mu_vector = _current_mu(final_state)
     mu_save_path = os.path.join(save_dir, "mu_star.npy")
     np.save(mu_save_path, mu_vector)
     print(f"mu*: {mu_vector}")

@@ -75,6 +75,12 @@ def parse_args():
         help="Random seed for stochastic evaluation",
     )
     parser.add_argument(
+        "--mu_star_path",
+        type=str,
+        default=None,
+        help="Path to a saved mu_star.npy (skip FairDICE training)",
+    )
+    parser.add_argument(
         "--grid",
         type=str,
         default="-0.10,-0.06,-0.02,0.02,0.06,0.10",
@@ -170,12 +176,13 @@ def main():
     print(f"[replicate_fig7_fourroom] Eval mode: {args.eval_mode}")
     print(f"[replicate_fig7_fourroom] Eval seed: {args.eval_seed}")
     base_seed = args.seed
+    mu_star_seed = base_seed if args.mu_star_path is None else "from_file"
     seeds = [int(x) for x in args.seeds.split(",") if x.strip() != ""]
     if not args.avg_over_seeds:
         seeds = [base_seed]
     if len(seeds) < 1:
         raise ValueError("Expected at least one seed for averaging.")
-    print(f"[replicate_fig7_fourroom] dataset_seed={base_seed}, mu_star_seed={base_seed}")
+    print(f"[replicate_fig7_fourroom] dataset_seed={base_seed}, mu_star_seed={mu_star_seed}")
     print(f"[replicate_fig7_fourroom] avg_over_seeds={args.avg_over_seeds}, seeds={seeds}")
     ensure_fourroom_registered()
     os.makedirs(args.save_root, exist_ok=True)
@@ -197,50 +204,66 @@ def main():
     assert base_config.divergence == args.divergence, (
         f"Config divergence mismatch: {base_config.divergence} != {args.divergence}"
     )
-    base_result = run_training(base_config)
-    mu_star = base_result["mu_vector"]
+    env = gym.make(base_config.env_name)
+    if hasattr(env, "num_objectives"):
+        base_config.reward_dim = env.num_objectives
+    else:
+        base_config.reward_dim = env.unwrapped.num_objectives
+
+    if args.mu_star_path:
+        print(f"[replicate_fig7_fourroom] Loading mu_star from {args.mu_star_path}")
+        mu_star = np.load(args.mu_star_path)
+        base_result = None
+        base_avg_returns = None
+        base_metrics = None
+    else:
+        base_result = run_training(base_config)
+        mu_star = base_result["mu_vector"]
+        base_raw_returns = None
+        eval_mode = args.eval_mode
+        eval_seed = args.eval_seed
+        if eval_mode == "both":
+            print("[eval] mode=greedy")
+            base_raw_returns, _, _ = evaluate_policy(
+                base_config,
+                base_result["policy"],
+                env,
+                os.path.join(base_result["save_dir"], "eval"),
+                num_episodes=args.eval_episodes,
+                max_steps=base_config.max_seq_len,
+                eval_mode="greedy",
+                eval_seed=eval_seed,
+            )
+            print("[eval] mode=sample")
+            evaluate_policy(
+                base_config,
+                base_result["policy"],
+                env,
+                os.path.join(base_result["save_dir"], "eval"),
+                num_episodes=args.eval_episodes,
+                max_steps=base_config.max_seq_len,
+                eval_mode="sample",
+                eval_seed=eval_seed,
+            )
+        else:
+            base_raw_returns, _, _ = evaluate_policy(
+                base_config,
+                base_result["policy"],
+                env,
+                os.path.join(base_result["save_dir"], "eval"),
+                num_episodes=args.eval_episodes,
+                max_steps=base_config.max_seq_len,
+                eval_mode=eval_mode,
+                eval_seed=eval_seed,
+            )
+        base_avg_returns = np.mean(base_raw_returns, axis=0)
+        base_metrics = welfare_metrics(base_avg_returns)
+
     np.save(output_dir / "mu_star.npy", mu_star)
 
-    env = gym.make(base_config.env_name)
+    env.close()
     eval_mode = args.eval_mode
     eval_seed = args.eval_seed
-    if eval_mode == "both":
-        print("[eval] mode=greedy")
-        base_raw_returns, _, _ = evaluate_policy(
-            base_config,
-            base_result["policy"],
-            env,
-            os.path.join(base_result["save_dir"], "eval"),
-            num_episodes=args.eval_episodes,
-            max_steps=base_config.max_seq_len,
-            eval_mode="greedy",
-            eval_seed=eval_seed,
-        )
-        print("[eval] mode=sample")
-        evaluate_policy(
-            base_config,
-            base_result["policy"],
-            env,
-            os.path.join(base_result["save_dir"], "eval"),
-            num_episodes=args.eval_episodes,
-            max_steps=base_config.max_seq_len,
-            eval_mode="sample",
-            eval_seed=eval_seed,
-        )
-    else:
-        base_raw_returns, _, _ = evaluate_policy(
-            base_config,
-            base_result["policy"],
-            env,
-            os.path.join(base_result["save_dir"], "eval"),
-            num_episodes=args.eval_episodes,
-            max_steps=base_config.max_seq_len,
-            eval_mode=eval_mode,
-            eval_seed=eval_seed,
-        )
-    env.close()
-    base_avg_returns = np.mean(base_raw_returns, axis=0)
-    base_metrics = welfare_metrics(base_avg_returns)
 
     grid_shape = (len(grid_values), len(grid_values))
     metric_keys = ["nsw", "usw", "jain"] + [f"obj{i+1}" for i in range(base_config.reward_dim)]
@@ -253,6 +276,10 @@ def main():
             mu_vec = mu_star.copy()
             mu_vec[1] = mu_vec[1] * (1.0 + d2)
             mu_vec[2] = mu_vec[2] * (1.0 + d3)
+            print(
+                f"[mu_fixed] d2={d2:+.2f} d3={d3:+.2f} "
+                f"mu={np.round(mu_vec, 6)}"
+            )
             run_metrics = []
             for seed in seeds:
                 try:
@@ -367,12 +394,12 @@ def main():
         "avg_over_seeds": args.avg_over_seeds,
         "grid": grid_values.tolist(),
         "mu_star": mu_star.tolist(),
-        "base_avg_returns": base_avg_returns.tolist(),
+        "base_avg_returns": base_avg_returns.tolist() if base_avg_returns is not None else None,
         "base_metrics": {
             "nsw": base_metrics[0],
             "utilitarian": base_metrics[1],
             "jain": base_metrics[2],
-        },
+        } if base_metrics is not None else None,
         "figure_png": str(fig_path_png),
         "figure_pdf": str(fig_path_pdf),
         "results_npz": str(npz_path),

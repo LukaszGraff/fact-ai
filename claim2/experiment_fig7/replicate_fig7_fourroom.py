@@ -81,6 +81,11 @@ def parse_args():
         help="Path to a saved mu_star.npy (skip FairDICE training)",
     )
     parser.add_argument(
+        "--grid_only",
+        action="store_true",
+        help="Only validate grid perturbations; skip training/evaluation",
+    )
+    parser.add_argument(
         "--grid",
         type=str,
         default="-0.10,-0.06,-0.02,0.02,0.06,0.10",
@@ -276,10 +281,32 @@ def main():
             mu_vec = mu_star.copy()
             mu_vec[1] = mu_vec[1] * (1.0 + d2)
             mu_vec[2] = mu_vec[2] * (1.0 + d3)
+            expected_mu = mu_star.copy()
+            expected_mu[1] = expected_mu[1] * (1.0 + d2)
+            expected_mu[2] = expected_mu[2] * (1.0 + d3)
+            assert abs(mu_vec[1] - expected_mu[1]) < 1e-6, (
+                f"mu2 mismatch: mu2={mu_vec[1]} expected={expected_mu[1]}"
+            )
+            assert abs(mu_vec[2] - expected_mu[2]) < 1e-6, (
+                f"mu3 mismatch: mu3={mu_vec[2]} expected={expected_mu[2]}"
+            )
+            implied = mu_vec / mu_star
+            print(
+                "[mu_check] "
+                f"mu_star={np.round(mu_star, 6)} "
+                f"d2={d2:+.6f} d3={d3:+.6f} "
+                f"expected_mu={np.round(expected_mu, 6)} "
+                f"actual_mu={np.round(mu_vec, 6)} "
+                f"implied_mult={np.round(implied, 6)}"
+            )
             print(
                 f"[mu_fixed] d2={d2:+.2f} d3={d3:+.2f} "
                 f"mu={np.round(mu_vec, 6)}"
             )
+            if args.grid_only:
+                progress.set_postfix({"d2%": int(d2 * 100), "d3%": int(d3 * 100)})
+                progress.update(1)
+                continue
             run_metrics = []
             for seed in seeds:
                 try:

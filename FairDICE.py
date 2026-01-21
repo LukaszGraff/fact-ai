@@ -2,12 +2,10 @@ from collections import namedtuple
 import jax
 import jax.numpy as jnp
 from flax import nnx
-from policy import GaussianPolicy, DiscretePolicy, MuNetwork
+from policy import GaussianPolicy, MuNetwork, DiscretePolicy
 from critic import Critic
 from divergence import f, FDivergence, f_derivative_inverse
 import orbax.checkpoint as orbax
-import tensorflow_probability.substrates.jax as tfp
-tfd = tfp.distributions
 
 NetworkState = namedtuple('NetworkState', ['graphdef', 'state', 'target_params'])
 TrainState = namedtuple('TrainState', ['policy_state', 'nu_state', 'mu_state', 'step'])
@@ -25,20 +23,23 @@ import optax
 
 def init_train_state(config) -> TrainState:
     rngs = nnx.Rngs(config.seed)
-
-    # Check if action space is discrete
-    is_discrete = hasattr(config, 'is_discrete') and config.is_discrete
     
+    # Check if we're using discrete actions
+    is_discrete = getattr(config, 'is_discrete', False)
+
     if is_discrete:
+        # Use DiscretePolicy for discrete action spaces
         policy = DiscretePolicy(
             input_dim=config.state_dim,
             hidden_dims=config.hidden_dims,
             action_dim=config.action_dim,
             activation=nnx.relu,
+            temperature=config.temperature,
             rngs=rngs,
             layer_norm=config.layer_norm
         )
     else:
+        # Use GaussianPolicy for continuous action spaces
         policy = GaussianPolicy(
             input_dim=config.state_dim,
             hidden_dims=config.hidden_dims,
@@ -94,6 +95,9 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
     init_states = batch.init_states
     mask = batch.masks.astype(jnp.float32)
     
+    # Check if using discrete actions (extracted early for closure capture)
+    is_discrete = getattr(config, 'is_discrete', False)
+    
     policy, policy_optim, _ = get_model(train_state.policy_state)
     nu_network, nu_optim, _ = get_model(train_state.nu_state)
     mu_network, mu_optim, _ = get_model(train_state.mu_state) 
@@ -108,11 +112,12 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
         mu = mu_network() 
         k = 1.0 / (mu+1e-8) 
         weighted_rewards = (rewards @ mu).reshape(-1, 1)
-        e = (weighted_rewards + gamma * next_nu - nu)
+        # For terminal states, don't bootstrap from next state (mask = 0 for terminals)
+        e = (weighted_rewards + gamma * mask * next_nu - nu)
         w = jax.nn.relu(f_derivative_inverse(e / beta, f_divergence))
         loss_1 = (1 - gamma) * jnp.mean(init_nu)
-        masked_term = mask * (w * e - beta * f(w, f_divergence))
-        loss_2 = jnp.sum(masked_term) / (jnp.sum(mask) + 1e-8)
+        # Include all transitions, not just non-terminal ones
+        loss_2 = jnp.mean(w * e - beta * f(w, f_divergence))
         loss_3 = jnp.sum(jnp.log(k) - mu * k)
 
         def nu_scalar(x):
@@ -136,28 +141,21 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
     nu_state_ = nnx.state((nu_network, nu_optim))
     mu_state_ = nnx.state((mu_network, mu_optim))
     
-    # Check if action space is discrete
-    is_discrete = hasattr(config, 'is_discrete') and config.is_discrete
-    
     def policy_loss_fn(policy):
-        output = policy(states)
+        dist = policy(states)
         
         if is_discrete:
-            # For discrete policies: output is (logits, probs)
-            logits, probs = output
-            log_probs = jnp.log(probs + 1e-8)  # Add small epsilon for numerical stability
-            # Select log probs for the actions taken
-            actions_int = batch.actions.astype(jnp.int32)
-            log_probs = log_probs[jnp.arange(log_probs.shape[0]), actions_int]
-            # Reshape to match expected shape for loss computation
-            log_probs = log_probs.reshape(-1, 1)
+            # For discrete actions, convert actions to integer indices
+            # Actions in batch are stored as floats, need to convert to int for Categorical log_prob
+            actions_int = batch.actions.astype(jnp.int32).flatten()
+            log_probs = dist.log_prob(actions_int).reshape(-1, 1)
         else:
-            # For continuous policies: output is a distribution
-            dist = output
+            # For continuous actions, use actions directly
             log_probs = dist.log_prob(batch.actions)
-            if len(log_probs.shape) == 1:
+            # Ensure log_probs has the right shape
+            if log_probs.ndim == 1:
                 log_probs = log_probs.reshape(-1, 1)
-            
+        
         weighted_rewards = (rewards @ mu).reshape(-1, 1)
         nu_val = nu_network(states)
         next_nu = nu_network(next_states)

@@ -15,6 +15,8 @@ from tqdm import tqdm
 import wandb
 import pandas as pd
 import jax
+import sys
+import shutil
 from datetime import datetime
 
 def main():
@@ -28,7 +30,6 @@ def main():
     parser.add_argument("--hidden_dim", type=int, default=256, help="Hidden dimension size")
     parser.add_argument("--num_layers", type=int, default=2, help="Number of layers in the network")
     parser.add_argument("--temperature", type=float, default=1.0, help="Temperature for the policy")
-    parser.add_argument("--tanh_squash_distribution", type=bool, default=False, help="Use tanh-squash distribution for actions if set")
     parser.add_argument("--layer_norm", type=bool, default=True, help="Use layer normalization if set")
     parser.add_argument("--nu_lr", type=float, default=3e-4, help="Nu learning rate")
     parser.add_argument("--policy_lr", type=float, default=3e-4, help="Policy learning rate")
@@ -46,6 +47,19 @@ def main():
     parser.add_argument("--eval_episodes", type=int, default=10, help="Evaluation episodes")
     parser.add_argument("--wandb", type=bool, default=False, help="Use wandb for logging")
     parser.add_argument("--save_path", type=str, default='./results', help="Path to save the model checkpoint")
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+        help="Override the run directory name under save_path (useful for sweeps). If not set, a timestamped name is used.",
+    )
+    parser.add_argument(
+        "--save_model_mode",
+        type=str,
+        choices=["best_nsw", "last"],
+        default="best_nsw",
+        help="Model saving mode: 'best_nsw' keeps best checkpoint by FourRoom NSW-of-mean during training; 'last' saves only final model.",
+    )
     parser.add_argument("--seed", type=int, default=0, help="Random seed")    
     parser.add_argument("--tag", type=str, default="", help="Tag for the experiment")
     
@@ -56,7 +70,7 @@ def main():
     data_path = f"./data/{config.env_name}/{config.env_name}_50000_{config.quality}_{config.preference_dist}.pkl"
     if not os.path.exists(data_path):
         print(f"Data not found at {data_path}. Generating data...")
-        from generate_MO_Four_Room_data import generate_offline_data
+        from generate_fourroom_data import generate_offline_data
         generate_offline_data(config.env_name, num_trajectories=300, quality=config.quality, preference_dist=config.preference_dist)
     
     with open(data_path, "rb") as f:
@@ -67,8 +81,13 @@ def main():
     env = gym.make(config.env_name)
     config.state_dim = env.observation_space.shape[0]
     config.action_dim = env.action_space.n  # Discrete action space
-    config.is_discrete = True  # FourRoom has discrete actions
     config.reward_dim = env.num_objectives
+    
+    # Flag for discrete action handling
+    config.is_discrete = True
+    
+    # For continuous policies (not used here but needed for compatibility)
+    config.tanh_squash_distribution = False
     
     # For discrete environments, we don't use state normalization from norm.py
     # Use simple z-score normalization based on data
@@ -107,9 +126,10 @@ def main():
         traj['actions'] = traj['actions'].astype(np.float32)
         traj["init_observations"] = np.tile(traj['observations'][0], (traj['observations'].shape[0], 1))
         traj["init_states"] = np.tile(traj['states'][0], (traj['states'].shape[0], 1))
-        # Add terminals field for buffer
-        traj["terminals"] = np.zeros(len(traj['observations']))
-        traj["terminals"][-1] = 1.0
+        # Use terminals from data if available, otherwise mark only last step as terminal
+        if "terminals" not in traj:
+            traj["terminals"] = np.zeros(len(traj['observations']))
+            traj["terminals"][-1] = 1.0
 
     # Concatenate all trajectories into batch
     tmp = defaultdict(list)
@@ -126,8 +146,11 @@ def main():
     
     config.hidden_dims = [config.hidden_dim] * config.num_layers
 
-    time_stamp = datetime.today().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{time_stamp}_{config.learner}_{config.env_name}_{config.quality}_{config.preference_dist}_{config.divergence}_beta{config.beta}_seed{config.seed}"
+    if config.run_name is not None:
+        run_name = str(config.run_name)
+    else:
+        time_stamp = datetime.today().strftime("%Y%m%d_%H%M%S")
+        run_name = f"{time_stamp}_{config.learner}_{config.env_name}_{config.quality}_{config.preference_dist}_{config.divergence}_beta{config.beta}_seed{config.seed}"
     
     if config.learner == "FairDICE":
         from FairDICE import init_train_state, train_step, get_model, save_model, load_model
@@ -144,6 +167,10 @@ def main():
     train_state = init_train_state(config)
     train_carry = (train_state, key)
     buffer = Buffer(batch)
+    
+    # Save best model during training based on NSW (computed as NSW-of-mean returns for FourRoom)
+    best_nsw_score = float('-inf') if config.save_model_mode == "best_nsw" else None
+    best_step = None
             
     def train_body(carry, _):
         train_state, key = carry
@@ -175,6 +202,49 @@ def main():
             max_steps=config.max_seq_len,
             t_env=step
         )
+
+        # Show policy loss during training (survives tqdm + Slurm stdout buffering).
+        policy_loss_value = float(np.asarray(update_info["policy_loss"][-1]))
+        nu_loss_value = float(np.asarray(update_info["nu_loss"][-1]))
+        mu_value = np.asarray(update_info["mu"][-1]).reshape(-1)
+        mu_str = np.array2string(mu_value, precision=4, separator=", ")
+        tqdm.write(f"Step {step}: policy_loss={policy_loss_value:.6f} | nu_loss={nu_loss_value:.6f} | mu={mu_str}")
+        sys.stdout.flush()
+
+        if config.save_model_mode == "best_nsw":
+            # NSW for FourRoom: NSW over the average return vector across episodes (NSW-of-mean)
+            eps = 0.001
+            returns_for_nsw = normalized_returns if config.normalize_reward else raw_returns
+            avg_returns = np.mean(returns_for_nsw, axis=0)
+            nsw_score = float(np.sum(np.log(np.asarray(avg_returns) + eps)))
+
+            # Save best model checkpoint during training
+            if best_nsw_score is None or nsw_score > best_nsw_score:
+                best_nsw_score = nsw_score
+                best_step = step
+
+                model_dir = os.path.abspath(os.path.join(save_dir, "model"))
+                tmp_dir = os.path.abspath(os.path.join(save_dir, "model_tmp"))
+                prev_dir = os.path.abspath(os.path.join(save_dir, "model_prev"))
+
+                if os.path.exists(tmp_dir):
+                    shutil.rmtree(tmp_dir)
+                save_model(train_carry[0], tmp_dir)
+
+                if os.path.exists(prev_dir):
+                    shutil.rmtree(prev_dir)
+                if os.path.exists(model_dir):
+                    os.rename(model_dir, prev_dir)
+                os.rename(tmp_dir, model_dir)
+                if os.path.exists(prev_dir):
+                    shutil.rmtree(prev_dir)
+
+                print(
+                    f"New best model at step {step} with NSW(score_of_mean_returns)={best_nsw_score:.6f} (avg_returns={avg_returns})"
+                )
+        
+        # (Optional) keep any extra evaluation-derived metrics here if you want,
+        # but do not use them for checkpoint selection.
         
         if config.wandb:
             for key, value in update_info.items():
@@ -188,7 +258,35 @@ def main():
         wandb.finish()
     
     if config.save_path:
-        save_model(train_carry[0], os.path.abspath(os.path.join(save_dir, "model")))
+        # Save config as JSON for later use (e.g., visualization)
+        import json
+        config_dict = {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in vars(config).items()}
+        with open(os.path.join(save_dir, "config.json"), "w") as f:
+            json.dump(config_dict, f, indent=2)
+
+        model_dir = os.path.abspath(os.path.join(save_dir, "model"))
+
+        if config.save_model_mode == "last":
+            # Save only the final model (write to temp dir then swap into place).
+            tmp_dir = os.path.abspath(os.path.join(save_dir, "model_tmp"))
+            prev_dir = os.path.abspath(os.path.join(save_dir, "model_prev"))
+            if os.path.exists(tmp_dir):
+                shutil.rmtree(tmp_dir)
+            save_model(train_carry[0], tmp_dir)
+
+            if os.path.exists(prev_dir):
+                shutil.rmtree(prev_dir)
+            if os.path.exists(model_dir):
+                os.rename(model_dir, prev_dir)
+            os.rename(tmp_dir, model_dir)
+            if os.path.exists(prev_dir):
+                shutil.rmtree(prev_dir)
+        else:
+            # best_nsw mode: model_dir is updated during training; if no save happened, save last.
+            if not os.path.exists(model_dir):
+                save_model(train_carry[0], model_dir)
+            elif best_step is not None and best_nsw_score is not None:
+                print(f"Final saved model is best from step {best_step} (NSW={best_nsw_score:.6f}).")
     
     print(f"Training complete. Results saved to {save_dir}")
 

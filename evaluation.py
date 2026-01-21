@@ -13,22 +13,24 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
     discounted_raw_returns = []          
     discounted_normalized_returns = []
     
-    # Check if action space is discrete
-    is_discrete = hasattr(config, 'is_discrete') and config.is_discrete
+    # Check if using discrete actions
+    is_discrete = getattr(config, 'is_discrete', False)
     
-    @jax.jit
-    def select_action(observation):
-        output = policy(observation)
-        if is_discrete:
-            # For discrete policies: output is (logits, probs)
-            logits, probs = output
-            action = jnp.argmax(probs, axis=-1)  # deterministic action: greedy
-        else:
-            # For continuous policies: output is a distribution
-            dist = output
-            action = dist.mean()  # deterministic action
-            action = action.flatten()
-        return action
+    if is_discrete:
+        @jax.jit
+        def select_action(observation):
+            # Add batch dimension for policy
+            obs_batch = observation.reshape(1, -1)
+            dist = policy(obs_batch)
+            # For discrete actions, take the most probable action (argmax)
+            action = jnp.argmax(dist.logits, axis=-1)
+            return action[0]  # Remove batch dimension
+    else:
+        @jax.jit
+        def select_action(observation):
+            dist = policy(observation)
+            action = dist.mean()  # deterministic action for continuous
+            return action.flatten()
 
     for iter in range(num_episodes):
         env.seed(iter)
@@ -43,16 +45,15 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
         
         while not done and steps < max_steps:
             s_t = normalization(state, config.state_mean, config.state_std)
-            action = select_action(s_t)
             
             if is_discrete:
-                # For discrete actions, convert to int
-                action = int(action)
+                # For discrete actions, get the integer action directly
+                action = int(select_action(s_t))
             else:
-                # For continuous actions, apply scaling and bias
-                action = (action * config.ACTION_SCALE + config.ACTION_BIAS).astype(np.float32)
+                # For continuous actions, scale and bias
+                action = (select_action(s_t) * config.ACTION_SCALE + config.ACTION_BIAS).astype(np.float32)
             
-            state, _, done, info= env.step(action)
+            state, _, done, info = env.step(action)
             
 
 
@@ -81,10 +82,26 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
     avg_discounted_raw_returns = np.mean(discounted_raw_returns, axis=0)
     avg_discounted_normalized_returns = np.mean(discounted_normalized_returns, axis=0)
     avg_steps = np.mean(steps_list)
-    avg_raw_nsw_score = np.mean(np.sum(np.log(raw_returns), axis=1))
-    avg_normalized_nsw_score = np.mean(np.sum(np.log(normalized_returns), axis=1))
-    avg_discounted_raw_nsw_score = np.mean(np.sum(np.log(discounted_raw_returns), axis=1))
-    avg_discounted_normalized_nsw_score = np.mean(np.sum(np.log(discounted_normalized_returns), axis=1))
+    
+    # Add small epsilon to avoid log(0) = -inf in NSW calculations
+    eps = 0.001
+
+    # For FourRoom, compute NSW over the average return vector across episodes (NSW-of-mean)
+    # instead of averaging per-episode NSW (mean-of-NSW). This is more stable when episodes
+    # often have zeros in some objectives.
+    env_name = str(getattr(config, "env_name", ""))
+    is_fourroom = "fourroom" in env_name.lower() or "four-room" in env_name.lower()
+    if is_fourroom:
+        avg_raw_nsw_score = float(np.sum(np.log(np.asarray(avg_raw_returns) + eps)))
+        avg_normalized_nsw_score = float(np.sum(np.log(np.asarray(avg_normalized_returns) + eps)))
+        avg_discounted_raw_nsw_score = float(np.sum(np.log(np.asarray(avg_discounted_raw_returns) + eps)))
+        avg_discounted_normalized_nsw_score = float(np.sum(np.log(np.asarray(avg_discounted_normalized_returns) + eps)))
+    else:
+        avg_raw_nsw_score = np.mean(np.sum(np.log(np.array(raw_returns) + eps), axis=1))
+        avg_normalized_nsw_score = np.mean(np.sum(np.log(np.array(normalized_returns) + eps), axis=1))
+        avg_discounted_raw_nsw_score = np.mean(np.sum(np.log(np.array(discounted_raw_returns) + eps), axis=1))
+        avg_discounted_normalized_nsw_score = np.mean(np.sum(np.log(np.array(discounted_normalized_returns) + eps), axis=1))
+    
     avg_raw_usw_score = np.mean(np.sum(raw_returns, axis=1))
     avg_normalized_usw_score = np.mean(np.sum(normalized_returns, axis=1))
     avg_raw_discounted_usw_score = np.mean(np.sum(discounted_raw_returns, axis=1))

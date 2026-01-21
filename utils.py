@@ -1,10 +1,18 @@
 from gym import Wrapper
 from gym.spaces.box import Box
 import gym
-import d4rl
 import environments
 import numpy as np
 import pickle
+
+# d4rl is only needed for MuJoCo environments, import lazily to avoid mujoco dependency
+d4rl = None
+
+def _ensure_d4rl():
+    global d4rl
+    if d4rl is None:
+        import d4rl as _d4rl
+        d4rl = _d4rl
 
 class MOOfflineEnv(Wrapper):
     def __init__(self, env_name, dataset='d4rl', num_objective=2, reset_noise_scale=1e-3):
@@ -12,6 +20,7 @@ class MOOfflineEnv(Wrapper):
         self.env_name = env_name
         self.dataset = dataset
         if dataset == 'd4rl':
+            _ensure_d4rl()  # Only import d4rl when actually needed
             env = gym.make(f"{self.env_name.lower()}-medium-v2")
         else:
             env = gym.make(f"{env_name}")

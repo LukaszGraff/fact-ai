@@ -85,6 +85,8 @@ def train_step_fixed(config, train_state: TrainState, batch, key: jax.random.PRN
     next_states = batch.next_states
     init_states = batch.init_states
     mask = batch.masks.astype(jnp.float32)
+    if len(mask.shape) == 1:
+        mask = mask.reshape(-1, 1)
 
     policy, policy_optim, _ = get_model(train_state.policy_state)
     nu_network, nu_optim, _ = get_model(train_state.nu_state)
@@ -97,12 +99,13 @@ def train_step_fixed(config, train_state: TrainState, batch, key: jax.random.PRN
         nu = nu_network(states)
         next_nu = nu_network(next_states)
         init_nu = nu_network(init_states)
+        assert rewards.shape[-1] == config.reward_dim
         weighted_rewards = (rewards @ mu).reshape(-1, 1)
-        e = (weighted_rewards + gamma * next_nu - nu)
+        e = (weighted_rewards + gamma * mask * next_nu - nu)
         w = jax.nn.relu(f_derivative_inverse(e / beta, f_divergence))
         loss_1 = (1 - gamma) * jnp.mean(init_nu)
-        masked_term = mask * (w * e - beta * f(w, f_divergence))
-        loss_2 = jnp.sum(masked_term) / (jnp.sum(mask) + 1e-8)
+        term = (w * e - beta * f(w, f_divergence))
+        loss_2 = jnp.mean(term)
 
         def nu_scalar(x):
             return jnp.squeeze(nu_network(x), -1)
@@ -140,7 +143,7 @@ def train_step_fixed(config, train_state: TrainState, batch, key: jax.random.PRN
         weighted_rewards = (rewards @ mu).reshape(-1, 1)
         nu_val = nu_network(states)
         next_nu = nu_network(next_states)
-        e_val = (weighted_rewards + gamma * next_nu - nu_val)
+        e_val = (weighted_rewards + gamma * mask * next_nu - nu_val)
         w_raw = jax.lax.stop_gradient(
             jax.nn.relu(f_derivative_inverse((e_val - jnp.max(e_val)) / beta, f_divergence))
         )

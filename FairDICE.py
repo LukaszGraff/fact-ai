@@ -6,11 +6,9 @@ from policy import GaussianPolicy, DiscretePolicy, MuNetwork
 from critic import Critic
 from divergence import f, FDivergence, f_derivative_inverse
 import orbax.checkpoint as orbax
-import tensorflow_probability.substrates.jax as tfp
-tfd = tfp.distributions
 
 NetworkState = namedtuple('NetworkState', ['graphdef', 'state', 'target_params'])
-TrainState = namedtuple('TrainState', ['policy_state', 'nu_state', 'mu_state', 'step'])
+TrainState = namedtuple('TrainState', ['policy_state', 'nu_state', 'mu_state', 'step', 'mu_prev'])
 Model = namedtuple('Model', ['network', 'optimizer', 'target_network'])
 
 def get_model(state: NetworkState) -> Model:
@@ -25,6 +23,12 @@ import optax
 
 def init_train_state(config) -> TrainState:
     rngs = nnx.Rngs(config.seed)
+    debug_mu = hasattr(config, 'debug_mu') and config.debug_mu
+    mu_init_noise_std = getattr(config, "mu_init_noise_std", 0.0)
+    if mu_init_noise_std > 0.0:
+        key = jax.random.PRNGKey(config.seed)
+        mu_init = 1.0 + mu_init_noise_std * jax.random.normal(key, (config.reward_dim,))
+        config.mu_init = mu_init
 
     # Check if action space is discrete
     is_discrete = hasattr(config, 'is_discrete') and config.is_discrete
@@ -56,7 +60,7 @@ def init_train_state(config) -> TrainState:
                 optax.cosine_decay_schedule(-config.policy_lr, config.total_train_steps)
             )
         )
-    policy_optim = nnx.Optimizer(policy, policy_tx)
+    policy_optim = nnx.Optimizer(policy, policy_tx, wrt=nnx.Param)
     (policy_gd, policy_state) = nnx.split((policy, policy_optim))
 
     nu = Critic(
@@ -65,22 +69,24 @@ def init_train_state(config) -> TrainState:
         layer_norm=config.layer_norm,
         rngs=rngs
     )
-    nu_optim = nnx.Optimizer(nu, optax.adam(learning_rate=config.nu_lr))
+    nu_optim = nnx.Optimizer(nu, optax.adam(learning_rate=config.nu_lr), wrt=nnx.Param)
     (nu_gd, nu_state) = nnx.split((nu, nu_optim))
     
     mu = MuNetwork(config)
-    mu_optim = nnx.Optimizer(mu, optax.adam(learning_rate=config.mu_lr))
+    mu_optim = nnx.Optimizer(mu, optax.adam(learning_rate=config.mu_lr), wrt=nnx.Param)
     (mu_gd, mu_state) = nnx.split((mu, mu_optim))
     
     nu_target = nu_state.filter(nnx.Param)
     policy_target = policy_state.filter(nnx.Param)
     mu_target = mu_state.filter(nnx.Param)
     
+    mu_prev = mu() if debug_mu else None
     return TrainState(
         policy_state=NetworkState(policy_gd, policy_state, policy_target),
         nu_state=NetworkState(nu_gd, nu_state, nu_target),
         mu_state=NetworkState(mu_gd, mu_state, mu_target),
-        step = jnp.array(0)
+        step = jnp.array(0),
+        mu_prev = mu_prev
         )
 
 def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):   
@@ -100,6 +106,8 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
 
     f_divergence = FDivergence[config.divergence]
     eps = jax.random.uniform(subkey)
+
+    debug_mu = hasattr(config, 'debug_mu') and config.debug_mu
 
     def nu_loss_fn(nu_network, mu_network):
         nu = nu_network(states)
@@ -127,11 +135,28 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
         )
         
         nu_loss = loss_1 + loss_2 + loss_3 + grad_penalty
+        if debug_mu:
+            e_over_beta = e / beta
+            mean_e_over_beta = jnp.mean(e_over_beta)
+            max_e_over_beta = jnp.max(e_over_beta)
+            min_e_over_beta = jnp.min(e_over_beta)
+            frac_e_over_beta_lt_neg10 = jnp.mean((e_over_beta < -10.0).astype(jnp.float32))
+            frac_e_over_beta_gt_neg1 = jnp.mean((e_over_beta > -1.0).astype(jnp.float32))
+            frac_w_pos = jnp.mean((w > 0).astype(jnp.float32))
+            frac_w_gt_5 = jnp.mean((w > 5.0).astype(jnp.float32))
+            frac_w_gt_20 = jnp.mean((w > 20.0).astype(jnp.float32))
+            mean_w = jnp.mean(w)
+            max_w = jnp.max(w)
+            return nu_loss, (w, e, mu, grad_penalty, loss_1, loss_2, loss_3, mean_e_over_beta, max_e_over_beta, min_e_over_beta, frac_w_pos, mean_w, max_w, frac_e_over_beta_lt_neg10, frac_e_over_beta_gt_neg1, frac_w_gt_5, frac_w_gt_20)
         return nu_loss, (w, e, mu, grad_penalty)
 
-    (nu_loss, (w, e, mu, grad_penalty)),  (nu_grads, mu_grads) = nnx.value_and_grad(nu_loss_fn, argnums = (0, 1), has_aux=True)(nu_network, mu_network)
-    nu_optim.update(nu_grads)
-    mu_optim.update(mu_grads)
+    (nu_loss, aux_out),  (nu_grads, mu_grads) = nnx.value_and_grad(nu_loss_fn, argnums = (0, 1), has_aux=True)(nu_network, mu_network)
+    if debug_mu:
+        (w, e, mu, grad_penalty, loss_1, loss_2, loss_3, mean_e_over_beta, max_e_over_beta, min_e_over_beta, frac_w_pos, mean_w, max_w, frac_e_over_beta_lt_neg10, frac_e_over_beta_gt_neg1, frac_w_gt_5, frac_w_gt_20) = aux_out
+    else:
+        (w, e, mu, grad_penalty) = aux_out
+    nu_optim.update(nu_network, nu_grads)
+    mu_optim.update(mu_network, mu_grads)
     
     nu_state_ = nnx.state((nu_network, nu_optim))
     mu_state_ = nnx.state((mu_network, mu_optim))
@@ -162,16 +187,33 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
         nu_val = nu_network(states)
         next_nu = nu_network(next_states)
         e_val = (weighted_rewards + gamma * next_nu - nu_val)
-        stable_w = jax.lax.stop_gradient(
+        w_raw = jax.lax.stop_gradient(
             jax.nn.relu(f_derivative_inverse((e_val - jnp.max(e_val))/ beta, f_divergence))
         )
-        stable_w = stable_w / (jnp.mean(stable_w) + 1e-8)
-        policy_loss = -(mask * stable_w * log_probs).sum() / (jnp.sum(mask) + 1e-8)
-        return policy_loss, log_probs
+        stable_w = w_raw / (jnp.mean(w_raw) + 1e-8)
+        policy_mask = jnp.ones_like(mask)
+        policy_loss = -(policy_mask * stable_w * log_probs).sum() / (jnp.sum(policy_mask) + 1e-8)
+        avg_log_prob = jnp.mean(log_probs)
+        avg_w = jnp.mean(stable_w)
+        avg_e = jnp.mean(e_val)
+        avg_w_raw = jnp.mean(w_raw)
+        avg_mask = jnp.mean(mask)
+        avg_neg_log_prob = jnp.mean(-log_probs)
+        frac_w_pos = jnp.mean((w_raw > 0).astype(jnp.float32))
+        avg_weighted_neg_log_prob = jnp.sum(mask * stable_w * (-log_probs)) / (jnp.sum(mask) + 1e-8)
+        avg_masked_w = jnp.sum(policy_mask * stable_w) / (jnp.sum(policy_mask) + 1e-8)
+        frac_w_pos_masked = jnp.sum(policy_mask * (w_raw > 0)) / (jnp.sum(policy_mask) + 1e-8)
+        return policy_loss, (log_probs, avg_log_prob, avg_w, avg_e, avg_w_raw, avg_mask, avg_neg_log_prob, frac_w_pos, avg_weighted_neg_log_prob, avg_masked_w, frac_w_pos_masked)
         
-    (policy_loss, log_probs), policy_grads= nnx.value_and_grad(policy_loss_fn, has_aux=True)(policy)
-    policy_optim.update(policy_grads)
+    (policy_loss, (log_probs, avg_log_prob, avg_w, avg_e, avg_w_raw, avg_mask, avg_neg_log_prob, frac_w_pos, avg_weighted_neg_log_prob, avg_masked_w, frac_w_pos_masked)), policy_grads = nnx.value_and_grad(policy_loss_fn, has_aux=True)(policy)
+    policy_optim.update(policy, policy_grads)
     policy_state_ = nnx.state((policy, policy_optim))
+
+    mu_prev = train_state.mu_prev
+    mu_after = mu_network() if debug_mu else None
+    mu_delta = None
+    if debug_mu:
+        mu_delta = mu_after - mu_prev if mu_prev is not None else jnp.zeros_like(mu_after)
 
     train_state = train_state._replace(
         policy_state = train_state.policy_state._replace(
@@ -182,14 +224,62 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
             ),
         mu_state = train_state.mu_state._replace(state = mu_state_),
         step = step + 1,
+        mu_prev = mu_after if debug_mu else train_state.mu_prev,
     )
-    
-    return train_state, {
+
+    metrics = {
         "policy_loss": policy_loss,
         "nu_loss": nu_loss,
-        "mu": mu,
+        "mu": mu_after if debug_mu else mu,
         "grad_penalty": grad_penalty,
     }
+    if debug_mu:
+        mu_grad_vec = jax.tree_util.tree_leaves(mu_grads)[0]
+        abs_mu_grad = jnp.abs(mu_grad_vec)
+        mu_grad_norm = jnp.linalg.norm(mu_grad_vec)
+        metrics.update({
+            "mu_delta": mu_delta,
+            "mu_grad": mu_grad_vec,
+            "abs_mu_grad_mean": jnp.mean(abs_mu_grad),
+            "abs_mu_grad_max": jnp.max(abs_mu_grad),
+            "mu_grad_norm": mu_grad_norm,
+            "loss_1": loss_1,
+            "loss_2": loss_2,
+            "loss_3": loss_3,
+            "frac_w_pos": frac_w_pos,
+            "mean_w": mean_w,
+            "max_w": max_w,
+            "mean_e_over_beta": mean_e_over_beta,
+            "max_e_over_beta": max_e_over_beta,
+            "min_e_over_beta": min_e_over_beta,
+            "frac_e_over_beta_lt_neg10": frac_e_over_beta_lt_neg10,
+            "frac_e_over_beta_gt_neg1": frac_e_over_beta_gt_neg1,
+            "frac_w_gt_5": frac_w_gt_5,
+            "frac_w_gt_20": frac_w_gt_20,
+        })
+
+        def loss2_mu(mu_vec):
+            weighted_rewards = (rewards @ mu_vec).reshape(-1, 1)
+            e_val = (weighted_rewards + gamma * next_nu - nu_val)
+            w_val = jax.nn.relu(f_derivative_inverse(e_val / beta, f_divergence))
+            masked_term = mask * (w_val * e_val - beta * f(w_val, f_divergence))
+            return jnp.sum(masked_term) / (jnp.sum(mask) + 1e-8)
+
+        def loss3_mu(mu_vec):
+            k_val = 1.0 / (mu_vec + 1e-8)
+            return jnp.sum(jnp.log(k_val) - mu_vec * k_val)
+
+        nu_val = nu_network(states)
+        next_nu = nu_network(next_states)
+        grad_loss2_mu = jax.grad(loss2_mu)(mu)
+        grad_loss3_mu = jax.grad(loss3_mu)(mu)
+        metrics.update({
+            "grad_loss2_mu": grad_loss2_mu,
+            "grad_loss3_mu": grad_loss3_mu,
+            "grad_loss2_mu_norm": jnp.linalg.norm(grad_loss2_mu),
+            "grad_loss3_mu_norm": jnp.linalg.norm(grad_loss3_mu),
+        })
+    return train_state, metrics
     
 def save_model(train_state: TrainState, path: str):
     checkpointer = orbax.PyTreeCheckpointer()

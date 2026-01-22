@@ -1,0 +1,24 @@
+{
+  "betas": [
+    0.001,
+    0.01,
+    0.1,
+    1.0
+  ],
+  "sigmas": [
+    0.001,
+    0.01,
+    0.1,
+    1.0
+  ],
+  "seeds": [
+    0
+  ],
+  "train_steps": 2000,
+  "batch_size": 256,
+  "hidden_dim": 768,
+  "num_layers": 3,
+  "divergence": "SOFT_CHI",
+  "eval_episodes": 50,
+  "mu_path": "./results/fig3_random_momdp/mu_star.npz"
+}

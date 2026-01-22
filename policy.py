@@ -7,7 +7,10 @@ import jax.numpy as jnp
 class MuNetwork(nnx.Module):
     def __init__(self,
                  config):
-        self.mu = nnx.Param(jnp.full((config.reward_dim,), 1.0))
+        init_value = getattr(config, "mu_init", None)
+        if init_value is None:
+            init_value = jnp.full((config.reward_dim,), 1.0)
+        self.mu = nnx.Param(jnp.array(init_value, dtype=jnp.float32))
         
     def __call__(self):
         return self.mu * 1.0
@@ -56,9 +59,12 @@ class DiscretePolicy(nnx.Module):
         probs = nnx.softmax(logits, axis=-1)
         return logits, probs
 
-import tensorflow_probability.substrates.jax as tfp
-tfd = tfp.distributions
-tfb = tfp.bijectors
+def _get_tfp():
+    try:
+        import tensorflow_probability.substrates.jax as tfp
+    except Exception as exc:
+        raise ImportError("tensorflow_probability is required for GaussianPolicy") from exc
+    return tfp.distributions, tfp.bijectors
 
 LOG_STD_MIN = -5.0
 LOG_STD_MAX = 2.0
@@ -90,6 +96,7 @@ class GaussianPolicy(nnx.Module):
         self.action_dim = action_dim
 
     def __call__(self, inputs):
+        tfd, tfb = _get_tfp()
         x = self.mlp_layer(inputs)
         
         means = self.mean_layer(x)
@@ -136,6 +143,7 @@ class MNDPolicy(nnx.Module):
         self.action_dim = action_dim
     
     def __call__(self, observations):
+        tfd, tfb = _get_tfp()
         x = self.mlp_layer(observations)
         
         means = self.mean_layer(x).reshape(-1, self.n_mixture, self.action_dim)

@@ -1,7 +1,10 @@
 from gym import Wrapper
 from gym.spaces.box import Box
 import gym
-import d4rl
+try:
+    import d4rl  # optional; only needed for MOOfflineEnv with D4RL datasets
+except ImportError:
+    d4rl = None
 import environments
 import numpy as np
 import pickle

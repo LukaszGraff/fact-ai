@@ -1,0 +1,9 @@
+gym==0.26.2
+numpy
+matplotlib
+tqdm
+jax
+flax
+optax
+orbax-checkpoint
+tensorflow_probability

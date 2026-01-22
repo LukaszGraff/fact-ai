@@ -1,0 +1,16 @@
+{
+  "seed": 0,
+  "gamma": 0.95,
+  "n_states": 50,
+  "n_actions": 4,
+  "reward_dim": 3,
+  "goals": [
+    31,
+    26,
+    40
+  ],
+  "optimality": 0.5,
+  "mixture_coefficient": 0.2906873077154155,
+  "j_unif": 0.5913511254257211,
+  "j_star": 0.8913856370531015
+}

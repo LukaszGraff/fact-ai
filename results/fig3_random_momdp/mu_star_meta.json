@@ -1,0 +1,14 @@
+{
+  "betas": [
+    0.1
+  ],
+  "seeds": [
+    0
+  ],
+  "train_steps": 2000,
+  "batch_size": 256,
+  "hidden_dim": 768,
+  "num_layers": 3,
+  "divergence": "SOFT_CHI",
+  "max_steps": 200
+}

@@ -13,7 +13,8 @@ class MuNetwork(nnx.Module):
         self.mu = nnx.Param(jnp.array(init_value, dtype=jnp.float32))
         
     def __call__(self):
-        return self.mu * 1.0
+        mu_raw = nnx.softplus(self.mu)
+        return mu_raw / (jnp.sum(mu_raw) + 1e-8)
 
 class MLP(nnx.Module):
     def __init__(self, din, dout = 1, hidden_dims = [256, 256], activation = nnx.relu, rngs: nnx.Rngs = nnx.Rngs(0), activate_final: bool = False, dropout_rate: float = 0.0, layer_norm: bool = False):

@@ -4,7 +4,7 @@ import numpy as np
 
 
 class RandomMOMDPEnv(gym.Env):
-    def __init__(self, seed=0, n_states=50, n_actions=4, reward_dim=3, gamma=0.95, max_steps=200):
+    def __init__(self, seed=0, n_states=50, n_actions=4, reward_dim=3, gamma=0.99, max_steps=200):
         super().__init__()
         self.n_states = n_states
         self.n_actions = n_actions

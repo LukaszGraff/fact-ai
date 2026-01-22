@@ -116,15 +116,20 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
         next_nu = nu_network(next_states)
         init_nu = nu_network(init_states)
         mu = mu_network() 
-        k = 1.0 / (mu+1e-8) 
         assert rewards.shape[-1] == config.reward_dim
         weighted_rewards = (rewards @ mu).reshape(-1, 1)
         e = (weighted_rewards + gamma * mask * next_nu - nu)
         w = jax.nn.relu(f_derivative_inverse(e / beta, f_divergence))
+        if len(w.shape) == 1:
+            w = w.reshape(-1, 1)
         loss_1 = (1 - gamma) * jnp.mean(init_nu)
         term = (w * e - beta * f(w, f_divergence))
         loss_2 = jnp.mean(term)
-        loss_3 = jnp.sum(jnp.log(k) - mu * k)
+        w_detached = jax.lax.stop_gradient(w)
+        w_sum = jnp.sum(w_detached) + 1e-8
+        k_hat = (1.0 - gamma) * (jnp.sum(w_detached * rewards, axis=0) / w_sum)
+        k_hat = jnp.maximum(k_hat, 1e-8)
+        loss_3 = jnp.sum(jnp.log(k_hat) - mu * k_hat)
 
         def nu_scalar(x):
             return jnp.squeeze(nu_network(x), -1)  
@@ -152,12 +157,12 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
             max_w = jnp.max(w)
             terminal_mask = (1.0 - mask)
             terminal_reward_mean = jnp.mean(jnp.linalg.norm(rewards, axis=-1) * terminal_mask.squeeze(-1))
-            return nu_loss, (w, e, mu, grad_penalty, loss_1, loss_2, loss_3, mean_e_over_beta, max_e_over_beta, min_e_over_beta, frac_w_pos, mean_w, max_w, frac_e_over_beta_lt_neg10, frac_e_over_beta_gt_neg1, frac_w_gt_5, frac_w_gt_20, terminal_reward_mean)
+            return nu_loss, (w, e, mu, grad_penalty, loss_1, loss_2, loss_3, mean_e_over_beta, max_e_over_beta, min_e_over_beta, frac_w_pos, mean_w, max_w, frac_e_over_beta_lt_neg10, frac_e_over_beta_gt_neg1, frac_w_gt_5, frac_w_gt_20, terminal_reward_mean, k_hat)
         return nu_loss, (w, e, mu, grad_penalty)
 
     (nu_loss, aux_out),  (nu_grads, mu_grads) = nnx.value_and_grad(nu_loss_fn, argnums = (0, 1), has_aux=True)(nu_network, mu_network)
     if debug_mu:
-        (w, e, mu, grad_penalty, loss_1, loss_2, loss_3, mean_e_over_beta, max_e_over_beta, min_e_over_beta, frac_w_pos, mean_w, max_w, frac_e_over_beta_lt_neg10, frac_e_over_beta_gt_neg1, frac_w_gt_5, frac_w_gt_20, terminal_reward_mean) = aux_out
+        (w, e, mu, grad_penalty, loss_1, loss_2, loss_3, mean_e_over_beta, max_e_over_beta, min_e_over_beta, frac_w_pos, mean_w, max_w, frac_e_over_beta_lt_neg10, frac_e_over_beta_gt_neg1, frac_w_gt_5, frac_w_gt_20, terminal_reward_mean, k_hat) = aux_out
     else:
         (w, e, mu, grad_penalty) = aux_out
     nu_optim.update(nu_network, nu_grads)
@@ -262,6 +267,7 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
             "frac_w_gt_5": frac_w_gt_5,
             "frac_w_gt_20": frac_w_gt_20,
             "terminal_reward_mean": terminal_reward_mean,
+            "k_hat": k_hat,
         })
 
         def loss2_mu(mu_vec):

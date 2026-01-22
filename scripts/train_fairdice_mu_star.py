@@ -107,6 +107,8 @@ def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interv
             grad_loss3_mu = np.asarray(last_update.get("grad_loss3_mu", np.zeros_like(last_update["mu"]))).tolist()
             grad_loss2_mu_norm = float(np.asarray(last_update.get("grad_loss2_mu_norm", 0.0)))
             grad_loss3_mu_norm = float(np.asarray(last_update.get("grad_loss3_mu_norm", 0.0)))
+            k_hat = np.asarray(last_update.get("k_hat", np.zeros_like(last_update["mu"])))
+            inv_k_hat = 1.0 / (k_hat + 1e-8)
             print(f"  {label} mu={mu_val}")
             print(f"  {label} mu_delta={mu_delta}")
             print(f"  {label} mu_grad={mu_grad}")
@@ -119,6 +121,8 @@ def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interv
             print(f"  {label} grad_loss2_mu={grad_loss2_mu}")
             print(f"  {label} grad_loss3_mu={grad_loss3_mu}")
             print(f"  {label} grad_loss2_mu_norm={grad_loss2_mu_norm:.6f}, grad_loss3_mu_norm={grad_loss3_mu_norm:.6f}")
+            print(f"  {label} k_hat={k_hat.tolist()}")
+            print(f"  {label} inv_k_hat={inv_k_hat.tolist()}")
         if eval_interval and eval_fn and (done_steps % eval_interval == 0 or done_steps == config.total_train_steps):
             metric = eval_fn(train_state, done_steps)
             if metric > best_metric:
@@ -215,7 +219,13 @@ def main():
                 eps = 1e-8
                 mean_returns = raw_returns.mean(axis=0)
                 nsw_val = float(np.sum(np.log(np.clip(mean_returns, eps, None))))
+                mu_net = get_model(train_state.mu_state)[0]
+                mu_val = np.array(mu_net())
+                inv_k = 1.0 / (mean_returns + eps)
                 print(f"[seed {seed}] NSW@{step} (FairDICE, beta={beta})={nsw_val:.4f}")
+                print(f"[seed {seed}] k={mean_returns.tolist()}")
+                print(f"[seed {seed}] inv_k={inv_k.tolist()}")
+                print(f"[seed {seed}] mu={mu_val.tolist()}")
                 return nsw_val
             train_state = train_fairdice(
                 train_step,

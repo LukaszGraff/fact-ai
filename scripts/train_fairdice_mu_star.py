@@ -51,7 +51,17 @@ def build_offline_batch(trajs, config):
     return batch
 
 
-def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interval=10000, label="", eval_interval=0, eval_fn=None):
+def train_fairdice(
+    train_step_fn,
+    init_state_fn,
+    config,
+    batch,
+    seed,
+    log_interval=10000,
+    label="",
+    eval_fn=None,
+    eval_interval=None,
+):
     key = jax.random.PRNGKey(seed)
     train_state = init_state_fn(config)
     buffer = Buffer(batch, is_discrete=True)
@@ -64,10 +74,12 @@ def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interv
         return (train_state, key), update_info
 
     remaining = config.total_train_steps
+    best_state = None
+    best_metrics = None
+    if eval_interval is None:
+        eval_interval = log_interval
     print(f"  {label} init done; starting training for {config.total_train_steps} steps")
     first_chunk = True
-    best_state = None
-    best_metric = -np.inf
     while remaining > 0:
         step_chunk = min(log_interval, remaining)
         if first_chunk:
@@ -82,6 +94,12 @@ def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interv
         nu_loss = float(np.asarray(last_update.get("nu_loss", 0.0)))
         policy_loss = float(np.asarray(last_update.get("policy_loss", 0.0)))
         print(f"  {label} progress: {done_steps}/{config.total_train_steps} (nu_loss={nu_loss:.4f}, policy_loss={policy_loss:.4f})")
+        if eval_fn and eval_interval and done_steps % eval_interval == 0:
+            metrics = eval_fn(train_state, done_steps)
+            if best_metrics is None or metrics["nsw"] > best_metrics["nsw"]:
+                best_state = train_state
+                best_metrics = metrics
+                print(f"  {label} new best NSW@{done_steps}={metrics['nsw']:.4f}")
         if config.debug_mu and "mu" in last_update:
             mu_val = np.asarray(last_update["mu"]).tolist()
             mu_delta = np.asarray(last_update.get("mu_delta", np.zeros_like(last_update["mu"]))).tolist()
@@ -123,16 +141,13 @@ def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interv
             print(f"  {label} grad_loss2_mu_norm={grad_loss2_mu_norm:.6f}, grad_loss3_mu_norm={grad_loss3_mu_norm:.6f}")
             print(f"  {label} k_hat={k_hat.tolist()}")
             print(f"  {label} inv_k_hat={inv_k_hat.tolist()}")
-        if eval_interval and eval_fn and (done_steps % eval_interval == 0 or done_steps == config.total_train_steps):
-            metric = eval_fn(train_state, done_steps)
-            if metric > best_metric:
-                best_metric = metric
-                best_state = train_state
-                print(f"  {label} new best NSW={best_metric:.4f} at step {done_steps}")
         first_chunk = False
     confirmation = f"  {label} done"
     print(confirmation)
-    return best_state if best_state is not None else train_state
+    if best_state is None:
+        best_state = train_state
+        best_metrics = eval_fn(train_state, config.total_train_steps) if eval_fn else None
+    return best_state, best_metrics
 
 
 def main():
@@ -159,6 +174,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     mu_star = np.zeros((len(betas), len(seeds), 3), dtype=np.float32)
+    final_nsw_map = {}
 
     if args.eval_interval <= 0:
         args.eval_interval = args.log_interval
@@ -204,8 +220,9 @@ def main():
             config.beta = beta
             config.seed = seed
             from FairDICE import init_train_state, train_step, get_model
-            def eval_fn(train_state, step):
-                policy = get_model(train_state.policy_state)[0]
+            best_key = f"beta_{beta}"
+            def eval_nsw(state, step):
+                policy = get_model(state.policy_state)[0]
                 raw_returns, _ = evaluate_policy(
                     config,
                     policy,
@@ -219,15 +236,9 @@ def main():
                 eps = 1e-8
                 mean_returns = raw_returns.mean(axis=0)
                 nsw_val = float(np.sum(np.log(np.clip(mean_returns, eps, None))))
-                mu_net = get_model(train_state.mu_state)[0]
-                mu_val = np.array(mu_net())
-                inv_k = 1.0 / (mean_returns + eps)
-                print(f"[seed {seed}] NSW@{step} (FairDICE, beta={beta})={nsw_val:.4f}")
-                print(f"[seed {seed}] k={mean_returns.tolist()}")
-                print(f"[seed {seed}] inv_k={inv_k.tolist()}")
-                print(f"[seed {seed}] mu={mu_val.tolist()}")
-                return nsw_val
-            train_state = train_fairdice(
+                return {"nsw": nsw_val, "mean_returns": mean_returns, "step": step}
+
+            best_state, best_metrics = train_fairdice(
                 train_step,
                 init_train_state,
                 config,
@@ -235,12 +246,28 @@ def main():
                 seed,
                 log_interval=args.log_interval,
                 label=f"FairDICE beta={beta}",
+                eval_fn=eval_nsw,
                 eval_interval=args.eval_interval,
-                eval_fn=eval_fn,
             )
-            mu_net = get_model(train_state.mu_state)[0]
+            if best_metrics is None:
+                best_metrics = eval_nsw(best_state, config.total_train_steps)
+            mean_returns = best_metrics["mean_returns"]
+            nsw_val = best_metrics["nsw"]
+            best_step = best_metrics.get("step", config.total_train_steps)
+            eps = 1e-8
+            mu_net = get_model(best_state.mu_state)[0]
+            mu_val = np.array(mu_net())
+            inv_k = 1.0 / (mean_returns + eps)
+            print(f"[seed {seed}] best NSW@{best_step} (FairDICE, beta={beta})={nsw_val:.4f}")
+            print(f"[seed {seed}] k={mean_returns.tolist()}")
+            print(f"[seed {seed}] inv_k={inv_k.tolist()}")
+            print(f"[seed {seed}] mu={mu_val.tolist()}")
+            mu_net = get_model(best_state.mu_state)[0]
             mu_star[beta_idx, seed_idx] = np.clip(np.array(mu_net()), 1e-8, None)
             print(f"[seed {seed}] mu_star: {mu_star[beta_idx, seed_idx]}")
+            if best_key not in final_nsw_map:
+                final_nsw_map[best_key] = []
+            final_nsw_map[best_key].append(nsw_val)
 
     mu_path = out_dir / "mu_star.npz"
     np.savez(
@@ -265,6 +292,10 @@ def main():
             f,
             indent=2,
         )
+    best_path = out_dir / "final_nsw_mu_star.json"
+    final_nsw_avg = {k: float(np.mean(v)) if v else None for k, v in final_nsw_map.items()}
+    with open(best_path, "w", encoding="utf-8") as f:
+        json.dump(final_nsw_avg, f, indent=2)
     print(f"Saved mu_star: {mu_path}")
 
 

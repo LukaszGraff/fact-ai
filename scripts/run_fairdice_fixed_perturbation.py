@@ -54,7 +54,7 @@ def build_offline_batch(trajs, config):
     return batch
 
 
-def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interval=10000, label="", eval_interval=0, eval_fn=None):
+def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interval=10000, label=""):
     key = jax.random.PRNGKey(seed)
     train_state = init_state_fn(config)
     buffer = Buffer(batch, is_discrete=True)
@@ -69,8 +69,6 @@ def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interv
     remaining = config.total_train_steps
     print(f"  {label} init done; starting training for {config.total_train_steps} steps")
     first_chunk = True
-    best_state = None
-    best_metric = -np.inf
     while remaining > 0:
         step_chunk = min(log_interval, remaining)
         if first_chunk:
@@ -85,15 +83,9 @@ def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interv
         nu_loss = float(np.asarray(last_update.get("nu_loss", 0.0)))
         policy_loss = float(np.asarray(last_update.get("policy_loss", 0.0)))
         print(f"  {label} progress: {done_steps}/{config.total_train_steps} (nu_loss={nu_loss:.4f}, policy_loss={policy_loss:.4f})")
-        if eval_interval and eval_fn and (done_steps % eval_interval == 0 or done_steps == config.total_train_steps):
-            metric = eval_fn(train_state, done_steps)
-            if metric > best_metric:
-                best_metric = metric
-                best_state = train_state
-                print(f"  {label} new best NSW={best_metric:.4f} at step {done_steps}")
         first_chunk = False
     print(f"  {label} done")
-    return best_state if best_state is not None else train_state
+    return train_state
 
 
 def main():
@@ -113,6 +105,7 @@ def main():
     parser.add_argument("--mu_path", type=str, default="./results/fig3_random_momdp/mu_star.npz")
     parser.add_argument("--log_interval", type=int, default=10000)
     parser.add_argument("--eval_interval", type=int, default=200, help="Evaluate every N steps (0 uses log_interval).")
+    parser.add_argument("--num_perturbations", type=int, default=3, help="Number of perturbations per (seed, beta, sigma).")
     args = parser.parse_args()
 
     seeds = parse_int_list(args.seeds)
@@ -120,8 +113,6 @@ def main():
     sigmas = parse_float_list(args.sigmas)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    if args.eval_interval <= 0:
-        args.eval_interval = args.log_interval
 
     mu_data = np.load(args.mu_path, allow_pickle=True)
     mu_betas = mu_data["betas"].astype(np.float32).tolist()
@@ -139,6 +130,7 @@ def main():
             raise ValueError(f"seed={seed} not found in {args.mu_path}")
 
     nsw = np.zeros((len(betas), len(sigmas), len(seeds)), dtype=np.float32)
+    final_nsw_map = {}
 
     for seed_idx, seed in enumerate(seeds):
         print(f"=== seed {seed} ({seed_idx + 1}/{len(seeds)}) ===")
@@ -184,20 +176,31 @@ def main():
 
             for sigma_idx, sigma in enumerate(sigmas):
                 print(f"[seed {seed}] training FairDICE-fixed (beta={beta}, sigma={sigma})")
-                seed_seq = np.random.SeedSequence(
-                    [seed, int(round(beta * 1e6)), int(round(sigma * 1e3))]
-                )
-                rng = np.random.default_rng(seed_seq)
-                noise = rng.normal(0.0, sigma, size=mu_star_val.shape)
-                mu_pert = mu_star_val * (1.0 + noise)
-                mu_pert = np.clip(mu_pert, 1e-8, None)
-                print(f"[seed {seed}] fixed_mu: {mu_pert}")
-                config.fixed_mu = mu_pert
+                nsw_vals = []
+                for pert_idx in range(args.num_perturbations):
+                    seed_seq = np.random.SeedSequence(
+                        [seed, int(round(beta * 1e6)), int(round(sigma * 1e3)), pert_idx]
+                    )
+                    rng = np.random.default_rng(seed_seq)
+                    noise = rng.normal(0.0, sigma, size=mu_star_val.shape)
+                    mu_pert = mu_star_val * (1.0 + noise)
+                    mu_pert = np.clip(mu_pert, 1e-8, None)
+                    mu_pert = mu_pert / (np.sum(mu_pert) + 1e-8)
+                    print(f"[seed {seed}] fixed_mu (perturb {pert_idx + 1}/{args.num_perturbations}): {mu_pert}")
+                    config.fixed_mu = mu_pert
 
-                from FairDICE_fixed import init_train_state as init_train_state_fixed
-                from FairDICE_fixed import train_step_fixed, get_model as get_model_fixed
-                def eval_fn_fixed(train_state, step):
-                    policy = get_model_fixed(train_state.policy_state)[0]
+                    from FairDICE_fixed import init_train_state as init_train_state_fixed
+                    from FairDICE_fixed import train_step_fixed, get_model as get_model_fixed
+                    train_state_fixed = train_fairdice(
+                        train_step_fixed,
+                        init_train_state_fixed,
+                        config,
+                        batch,
+                        seed,
+                        log_interval=args.log_interval,
+                        label=f"FairDICE-fixed beta={beta} sigma={sigma} perturb={pert_idx + 1}",
+                    )
+                    policy = get_model_fixed(train_state_fixed.policy_state)[0]
                     raw_returns, _ = evaluate_policy(
                         config,
                         policy,
@@ -211,35 +214,14 @@ def main():
                     eps = 1e-8
                     mean_returns = raw_returns.mean(axis=0)
                     nsw_val = float(np.sum(np.log(np.clip(mean_returns, eps, None))))
-                    print(f"[seed {seed}] NSW@{step} (Fixed, beta={beta}, sigma={sigma})={nsw_val:.4f}")
-                    return nsw_val
-                train_state_fixed = train_fairdice(
-                    train_step_fixed,
-                    init_train_state_fixed,
-                    config,
-                    batch,
-                    seed,
-                    log_interval=args.log_interval,
-                    label=f"FairDICE-fixed beta={beta} sigma={sigma}",
-                    eval_interval=args.eval_interval,
-                    eval_fn=eval_fn_fixed,
-                )
-                policy = get_model_fixed(train_state_fixed.policy_state)[0]
-                raw_returns, _ = evaluate_policy(
-                    config,
-                    policy,
-                    env,
-                    str(out_dir),
-                    num_episodes=args.eval_episodes,
-                    max_steps=args.max_eval_steps,
-                    t_env=None,
-                )
-                raw_returns = np.asarray(raw_returns)
-                eps = 1e-8
-                mean_returns = raw_returns.mean(axis=0)
-                nsw_val = float(np.sum(np.log(np.clip(mean_returns, eps, None))))
-                nsw[beta_idx, sigma_idx, seed_idx] = nsw_val
-                print(f"[seed {seed}] NSW (Fixed, beta={beta}, sigma={sigma})={nsw_val:.4f}")
+                    nsw_vals.append(nsw_val)
+                    print(f"[seed {seed}] NSW@{config.total_train_steps} (Fixed, beta={beta}, sigma={sigma}, perturb={pert_idx + 1})={nsw_val:.4f}")
+                    best_key = f"beta_{beta}_sigma_{sigma}"
+                    if best_key not in final_nsw_map:
+                        final_nsw_map[best_key] = []
+                    final_nsw_map[best_key].append(nsw_val)
+                nsw[beta_idx, sigma_idx, seed_idx] = float(np.mean(nsw_vals))
+                print(f"[seed {seed}] NSW@{config.total_train_steps} mean over {args.num_perturbations} perturbations (Fixed, beta={beta}, sigma={sigma})={nsw[beta_idx, sigma_idx, seed_idx]:.4f}")
 
     results_path = out_dir / "fig3_random_momdp_results.npz"
     np.savez(
@@ -251,6 +233,10 @@ def main():
     )
 
     mean_nsw = nsw.mean(axis=2)
+    if len(seeds) > 1:
+        stderr_nsw = nsw.std(axis=2, ddof=1) / np.sqrt(len(seeds))
+    else:
+        stderr_nsw = np.zeros_like(mean_nsw)
     sigmas_arr = np.array(sigmas, dtype=np.float32)
     positive_sigmas = sigmas_arr[sigmas_arr > 0]
     min_pos = positive_sigmas.min() if positive_sigmas.size > 0 else 1.0
@@ -259,7 +245,14 @@ def main():
 
     fig, ax = plt.subplots(figsize=(6, 4))
     for beta_idx, beta in enumerate(betas):
-        ax.plot(x_plot, mean_nsw[beta_idx], marker="o", label=f"beta={beta}")
+        ax.errorbar(
+            x_plot,
+            mean_nsw[beta_idx],
+            yerr=stderr_nsw[beta_idx],
+            marker="o",
+            capsize=3,
+            label=f"beta={beta}",
+        )
     ax.set_xscale("log")
     ax.set_xlabel("sigma")
     ax.set_ylabel("NSW")
@@ -286,10 +279,15 @@ def main():
                 "divergence": args.divergence,
                 "eval_episodes": args.eval_episodes,
                 "mu_path": args.mu_path,
+                "num_perturbations": args.num_perturbations,
             },
             f,
             indent=2,
         )
+    best_path = out_dir / "final_nsw_fixed.json"
+    final_nsw_avg = {k: float(np.mean(v)) if v else None for k, v in final_nsw_map.items()}
+    with open(best_path, "w", encoding="utf-8") as f:
+        json.dump(final_nsw_avg, f, indent=2)
     print(f"Saved results: {results_path}")
     print(f"Saved plot: {plot_path}")
 

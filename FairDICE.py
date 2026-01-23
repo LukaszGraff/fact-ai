@@ -193,26 +193,25 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
             if len(log_probs.shape) == 1:
                 log_probs = log_probs.reshape(-1, 1)
             
-        weighted_rewards = (rewards @ mu).reshape(-1, 1)
+        mu_current = mu_network()
+        weighted_rewards = (rewards @ mu_current).reshape(-1, 1)
         nu_val = nu_network(states)
         next_nu = nu_network(next_states)
         e_val = (weighted_rewards + gamma * mask * next_nu - nu_val)
-        w_raw = jax.lax.stop_gradient(
-            jax.nn.relu(f_derivative_inverse((e_val - jnp.max(e_val))/ beta, f_divergence))
+        w = jax.lax.stop_gradient(
+            jax.nn.relu(f_derivative_inverse(e_val / beta, f_divergence))
         )
-        stable_w = w_raw / (jnp.mean(w_raw) + 1e-8)
-        policy_mask = jnp.ones_like(mask)
-        policy_loss = -(policy_mask * stable_w * log_probs).sum() / (jnp.sum(policy_mask) + 1e-8)
+        policy_loss = -jnp.mean(w * log_probs)
         avg_log_prob = jnp.mean(log_probs)
-        avg_w = jnp.mean(stable_w)
+        avg_w = jnp.mean(w)
         avg_e = jnp.mean(e_val)
-        avg_w_raw = jnp.mean(w_raw)
+        avg_w_raw = avg_w
         avg_mask = jnp.mean(mask)
         avg_neg_log_prob = jnp.mean(-log_probs)
-        frac_w_pos = jnp.mean((w_raw > 0).astype(jnp.float32))
-        avg_weighted_neg_log_prob = jnp.sum(mask * stable_w * (-log_probs)) / (jnp.sum(mask) + 1e-8)
-        avg_masked_w = jnp.sum(policy_mask * stable_w) / (jnp.sum(policy_mask) + 1e-8)
-        frac_w_pos_masked = jnp.sum(policy_mask * (w_raw > 0)) / (jnp.sum(policy_mask) + 1e-8)
+        frac_w_pos = jnp.mean((w > 0).astype(jnp.float32))
+        avg_weighted_neg_log_prob = jnp.mean(w * (-log_probs))
+        avg_masked_w = avg_w
+        frac_w_pos_masked = frac_w_pos
         return policy_loss, (log_probs, avg_log_prob, avg_w, avg_e, avg_w_raw, avg_mask, avg_neg_log_prob, frac_w_pos, avg_weighted_neg_log_prob, avg_masked_w, frac_w_pos_masked)
         
     (policy_loss, (log_probs, avg_log_prob, avg_w, avg_e, avg_w_raw, avg_mask, avg_neg_log_prob, frac_w_pos, avg_weighted_neg_log_prob, avg_masked_w, frac_w_pos_masked)), policy_grads = nnx.value_and_grad(policy_loss_fn, has_aux=True)(policy)

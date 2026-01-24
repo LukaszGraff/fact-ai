@@ -54,7 +54,7 @@ def build_offline_batch(trajs, config):
     return batch
 
 
-def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interval=10000, label=""):
+def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interval=10000, label="", eval_fn=None):
     key = jax.random.PRNGKey(seed)
     train_state = init_state_fn(config)
     buffer = Buffer(batch, is_discrete=True)
@@ -82,7 +82,23 @@ def train_fairdice(train_step_fn, init_state_fn, config, batch, seed, log_interv
         last_update = {k: v[-1] for k, v in update_info.items()}
         nu_loss = float(np.asarray(last_update.get("nu_loss", 0.0)))
         policy_loss = float(np.asarray(last_update.get("policy_loss", 0.0)))
-        print(f"  {label} progress: {done_steps}/{config.total_train_steps} (nu_loss={nu_loss:.4f}, policy_loss={policy_loss:.4f})")
+        log_line = (
+            f"  {label} {done_steps}/{config.total_train_steps} "
+            f"nu={nu_loss:.4f} pi={policy_loss:.4f}"
+        )
+        if eval_fn and done_steps % log_interval == 0:
+            metrics = eval_fn(train_state, done_steps)
+            mu_vec = np.asarray(getattr(config, "fixed_mu", []))
+            mu_list = [float(x) for x in mu_vec] if mu_vec.size else []
+            k_list = [float(x) for x in metrics.get("mean_returns", [])]
+            grad_penalty = float(np.asarray(last_update.get("grad_penalty", 0.0)))
+            log_line += (
+                f" NSW={metrics['nsw']:.4f}"
+                f" mu={mu_list}"
+                f" k={k_list}"
+                f" gp={grad_penalty:.6f}"
+            )
+        print(log_line)
         first_chunk = False
     print(f"  {label} done")
     return train_state
@@ -105,7 +121,7 @@ def main():
     parser.add_argument("--mu_path", type=str, default="./results/fig3_random_momdp/mu_star.npz")
     parser.add_argument("--log_interval", type=int, default=10000)
     parser.add_argument("--eval_interval", type=int, default=200, help="Evaluate every N steps (0 uses log_interval).")
-    parser.add_argument("--num_perturbations", type=int, default=3, help="Number of perturbations per (seed, beta, sigma).")
+    parser.add_argument("--num_perturbations", type=int, default=1, help="Number of perturbations per (seed, beta, sigma).")
     args = parser.parse_args()
 
     seeds = parse_int_list(args.seeds)
@@ -191,6 +207,23 @@ def main():
 
                     from FairDICE_fixed import init_train_state as init_train_state_fixed
                     from FairDICE_fixed import train_step_fixed, get_model as get_model_fixed
+                    def eval_nsw(state, step):
+                        policy = get_model_fixed(state.policy_state)[0]
+                        raw_returns, _ = evaluate_policy(
+                            config,
+                            policy,
+                            env,
+                            str(out_dir),
+                            num_episodes=args.eval_episodes,
+                            max_steps=args.max_eval_steps,
+                            t_env=None,
+                        )
+                        raw_returns = np.asarray(raw_returns)
+                        eps = 1e-8
+                        mean_returns = raw_returns.mean(axis=0)
+                        nsw_val = float(np.sum(np.log(np.clip(mean_returns, eps, None))))
+                        return {"nsw": nsw_val, "mean_returns": mean_returns, "step": step}
+
                     train_state_fixed = train_fairdice(
                         train_step_fixed,
                         init_train_state_fixed,
@@ -199,6 +232,7 @@ def main():
                         seed,
                         log_interval=args.log_interval,
                         label=f"FairDICE-fixed beta={beta} sigma={sigma} perturb={pert_idx + 1}",
+                        eval_fn=eval_nsw,
                     )
                     policy = get_model_fixed(train_state_fixed.policy_state)[0]
                     raw_returns, _ = evaluate_policy(

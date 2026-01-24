@@ -21,16 +21,16 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
     is_discrete = hasattr(config, 'is_discrete') and config.is_discrete
     
     @jax.jit
-    def select_action(observation):
+    def select_action(observation, rng_key):
         output = policy(observation)
         if is_discrete:
             # For discrete policies: output is (logits, probs)
-            logits, probs = output
-            action = jnp.argmax(probs, axis=-1)  # deterministic action: greedy
+            _, probs = output
+            action = jax.random.categorical(rng_key, jnp.log(probs + 1e-8), axis=-1)
         else:
             # For continuous policies: output is a distribution
             dist = output
-            action = dist.mean()  # deterministic action
+            action = dist.sample(seed=rng_key)
             action = action.flatten()
         return action
 
@@ -45,7 +45,8 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
         discounted_normalized_rewards_list = []
         while not done and steps < max_steps:
             s_t = normalization(state, config.state_mean, config.state_std)
-            action = select_action(s_t)
+            key, subkey = jax.random.split(key)
+            action = select_action(s_t, subkey)
             
             if is_discrete:
                 # For discrete actions, convert to int

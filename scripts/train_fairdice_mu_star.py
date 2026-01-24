@@ -93,13 +93,32 @@ def train_fairdice(
         last_update = {k: v[-1] for k, v in update_info.items()}
         nu_loss = float(np.asarray(last_update.get("nu_loss", 0.0)))
         policy_loss = float(np.asarray(last_update.get("policy_loss", 0.0)))
-        print(f"  {label} progress: {done_steps}/{config.total_train_steps} (nu_loss={nu_loss:.4f}, policy_loss={policy_loss:.4f})")
+        log_line = (
+            f"  {label} {done_steps}/{config.total_train_steps} "
+            f"nu={nu_loss:.4f} pi={policy_loss:.4f}"
+        )
+        metrics = None
         if eval_fn and eval_interval and done_steps % eval_interval == 0:
             metrics = eval_fn(train_state, done_steps)
-            if best_metrics is None or metrics["nsw"] > best_metrics["nsw"]:
-                best_state = train_state
-                best_metrics = metrics
-                print(f"  {label} new best NSW@{done_steps}={metrics['nsw']:.4f}")
+        if eval_fn and done_steps % log_interval == 0:
+            if metrics is None:
+                metrics = eval_fn(train_state, done_steps)
+            mu_vec = np.asarray(last_update.get("mu", []))
+            mu_list = [float(x) for x in mu_vec] if mu_vec.size else []
+            k_list = [float(x) for x in metrics.get("mean_returns", [])]
+            grad_penalty = float(np.asarray(last_update.get("grad_penalty", 0.0)))
+            log_line += (
+                f" NSW={metrics['nsw']:.4f}"
+                f" mu={mu_list}"
+                f" k={k_list}"
+                f" gp={grad_penalty:.6f}"
+            )
+        is_new_best = metrics is not None and (best_metrics is None or metrics["nsw"] > best_metrics["nsw"])
+        if is_new_best:
+            best_state = train_state
+            best_metrics = metrics
+            log_line += " best"
+        print(log_line)
         if config.debug_mu and "mu" in last_update:
             mu_val = np.asarray(last_update["mu"]).tolist()
             mu_delta = np.asarray(last_update.get("mu_delta", np.zeros_like(last_update["mu"]))).tolist()

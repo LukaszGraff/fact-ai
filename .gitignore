@@ -2,4 +2,3 @@ data/
 # cache
 __pycache__/
 results/
-logs/

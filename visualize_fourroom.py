@@ -187,6 +187,18 @@ def visualize_episode(env, policy, config, num_steps=400, is_discrete=True, use_
     
     return trajectory
 
+
+def _add_normalized_episode_visits(heatmap, states, grid_size):
+    """Accumulate per-episode normalized visitation counts into heatmap."""
+    episode_map = np.zeros_like(heatmap, dtype=np.float64)
+    for x, y in states:
+        if 0 <= int(x) < grid_size and 0 <= int(y) < grid_size:
+            episode_map[int(y), int(x)] += 1.0
+    total = episode_map.sum()
+    if total > 0:
+        heatmap += episode_map / total
+    return heatmap
+
 def create_static_visualization(trajectory, env, save_path=None):
     """Create a static image showing the trajectory."""
     fig, ax = plt.subplots(figsize=(10, 10))
@@ -252,10 +264,9 @@ def create_heatmap_visualization(trajectories, env, save_path=None):
     
     # Count visits to each cell
     for trajectory in trajectories:
-        states = np.array(trajectory['states'])
-        for x, y in states:
-            if 0 <= x < grid_size and 0 <= y < grid_size:
-                heatmap[int(y), int(x)] += 1
+        heatmap = _add_normalized_episode_visits(
+            heatmap, trajectory['states'], grid_size
+        )
     
     fig, ax = plt.subplots(figsize=(10, 10))
     
@@ -324,10 +335,9 @@ def create_policy_heatmap_visualization(
         heatmap = np.zeros((grid_size, grid_size), dtype=np.float64)
         if trajectories is not None:
             for trajectory in trajectories:
-                states = np.array(trajectory['states'])
-                for x, y in states:
-                    if 0 <= x < grid_size and 0 <= y < grid_size:
-                        heatmap[int(y), int(x)] += 1
+                heatmap = _add_normalized_episode_visits(
+                    heatmap, trajectory['states'], grid_size
+                )
     
     # Normalize heatmap to [0, 1]
     if heatmap.max() > 0:
@@ -360,6 +370,7 @@ def create_policy_heatmap_visualization(
     
     # Draw policy arrows for each non-wall cell
     # Action mapping: UP=0, DOWN=1, LEFT=2, RIGHT=3
+    action_dim = int(env.action_space.n)
     arrow_dx = {0: 0, 1: 0, 2: -0.35, 3: 0.35}  # x offset
     arrow_dy = {0: -0.35, 1: 0.35, 2: 0, 3: 0}  # y offset (inverted for display)
     
@@ -375,13 +386,26 @@ def create_policy_heatmap_visualization(
                 else:
                     probs = policy_probs[y, x]
 
-                best_action = int(jnp.argmax(probs))
-                dx = arrow_dx[best_action]
-                dy = arrow_dy[best_action]
-                confidence = float(probs[best_action])
-                arrow_color = (0.6 - 0.4 * confidence, 0.2, 0.2)
-                ax.arrow(x, y, dx, dy, head_width=0.2, head_length=0.1,
-                        fc=arrow_color, ec=arrow_color, linewidth=1.5)
+                # Draw arrows for all actions with opacity based on probability
+                for action in range(action_dim):
+                    dx = arrow_dx[action]
+                    dy = arrow_dy[action]
+                    alpha = float(probs[action])
+                    if alpha <= 0:
+                        continue
+                    arrow_color = (0.3, 0.2, 0.2)
+                    ax.arrow(
+                        x,
+                        y,
+                        dx,
+                        dy,
+                        head_width=0.2,
+                        head_length=0.1,
+                        fc=arrow_color,
+                        ec=arrow_color,
+                        alpha=alpha,
+                        linewidth=1.5,
+                    )
     
     # Draw goals with colored squares (like in paper)
     goal_colors = ['#FF4444', '#44FF44', '#4444FF']  # Red, Green, Blue
@@ -485,9 +509,9 @@ def _aggregate_sweep_policy_heatmap(
                 use_greedy=not stochastic,
                 rng_key=ep_key,
             )
-            for x, y in np.array(traj['states']):
-                if 0 <= int(x) < grid_size and 0 <= int(y) < grid_size:
-                    heatmap[int(y), int(x)] += 1.0
+            heatmap = _add_normalized_episode_visits(
+                heatmap, traj['states'], grid_size
+            )
 
         if (idx + 1) % 50 == 0:
             print(f"Processed {idx+1}/{len(run_dirs)} models")
@@ -522,8 +546,8 @@ def main():
     parser.add_argument("--episodes_per_model", type=int, default=5, help="(Sweep mode) episodes per model")
     parser.add_argument("--limit_models", type=int, default=None, help="(Sweep mode) optional cap for quick tests")
     parser.add_argument("--output", type=str, default=None, help="Output image path (defaults: policy_heatmap.png or aggregate_policy_heatmap.png)")
-    parser.add_argument("--num_episodes", type=int, default=300, help="Number of episodes to visualize")
-    parser.add_argument("--max_steps", type=int, default=400, help="Max steps per episode")
+    parser.add_argument("--num_episodes", type=int, default=100, help="Number of episodes to visualize")
+    parser.add_argument("--max_steps", type=int, default=100, help="Max steps per episode")
     parser.add_argument("--env_name", type=str, default="MO-FourRoom-v2", help="Environment name")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--random_policy", action="store_true", help="Use random policy instead of trained")
@@ -554,12 +578,19 @@ def main():
     data_path = f"./data/{args.env_name}/{args.env_name}_50000_amateur_uniform.pkl"
     if os.path.exists(data_path):
         import pickle
-        with open(data_path, "rb") as f:
-            trajs = pickle.load(f)
-        all_states = np.concatenate([traj['observations'] for traj in trajs], axis=0)
-        state_mean = all_states.mean(axis=0)
-        state_std = all_states.std(axis=0) + 1e-8
-        print(f"Loaded normalization params from data: mean={state_mean}, std={state_std}")
+        try:
+            with open(data_path, "rb") as f:
+                trajs = pickle.load(f)
+            all_states = np.concatenate([traj['observations'] for traj in trajs], axis=0)
+            state_mean = all_states.mean(axis=0)
+            state_std = all_states.std(axis=0) + 1e-8
+            print(f"Loaded normalization params from data: mean={state_mean}, std={state_std}")
+        except (ModuleNotFoundError, AttributeError, ImportError) as exc:
+            # Handle pickle compatibility issues across numpy versions.
+            state_mean = np.array([6.0, 6.0])
+            state_std = np.array([4.0, 4.0])
+            print(f"Warning: Failed to load normalization params from {data_path}: {exc}")
+            print(f"Warning: Using fallback normalization params: mean={state_mean}, std={state_std}")
     else:
         # Fallback to approximate values
         state_mean = np.array([6.0, 6.0])

@@ -57,9 +57,10 @@ def main():
         "--save_model_mode",
         type=str,
         choices=["best_nsw", "last"],
-        default="best_nsw",
+        default="last",
         help="Model saving mode: 'best_nsw' keeps best checkpoint by FourRoom NSW-of-mean during training; 'last' saves only final model.",
     )
+    # CQL baseline args removed.
     parser.add_argument("--seed", type=int, default=0, help="Random seed")    
     parser.add_argument("--tag", type=str, default="", help="Tag for the experiment")
     
@@ -67,7 +68,13 @@ def main():
     config = SimpleNamespace(**vars(args))
     
     # Load data
-    data_path = f"./data/{config.env_name}/{config.env_name}_50000_{config.quality}_{config.preference_dist}.pkl"
+    data_root = os.environ.get("DATA_ROOT", ".")
+    data_path = os.path.join(
+        data_root,
+        "data",
+        config.env_name,
+        f"{config.env_name}_50000_{config.quality}_{config.preference_dist}.pkl",
+    )
     if not os.path.exists(data_path):
         print(f"Data not found at {data_path}. Generating data...")
         from generate_fourroom_data import generate_offline_data

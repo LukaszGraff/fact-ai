@@ -18,12 +18,12 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
     
     if is_discrete:
         @jax.jit
-        def select_action(observation):
+        def select_action(observation, key):
             # Add batch dimension for policy
             obs_batch = observation.reshape(1, -1)
             dist = policy(obs_batch)
-            # For discrete actions, take the most probable action (argmax)
-            action = jnp.argmax(dist.logits, axis=-1)
+            # Sample an action from the categorical policy.
+            action = jax.random.categorical(key, dist.logits, axis=-1)
             return action[0]  # Remove batch dimension
     else:
         @jax.jit
@@ -47,8 +47,9 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
             s_t = normalization(state, config.state_mean, config.state_std)
             
             if is_discrete:
-                # For discrete actions, get the integer action directly
-                action = int(select_action(s_t))
+                # For discrete actions, sample an action using a PRNG key
+                key, subkey = jax.random.split(key)
+                action = int(select_action(s_t, subkey))
             else:
                 # For continuous actions, scale and bias
                 action = (select_action(s_t) * config.ACTION_SCALE + config.ACTION_BIAS).astype(np.float32)

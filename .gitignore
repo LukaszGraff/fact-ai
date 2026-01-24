@@ -1,7 +1,0 @@
-data/
-# cache
-__pycache__/
-results/
-logs/
-.venv
-fig7_runs

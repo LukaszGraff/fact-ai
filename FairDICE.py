@@ -11,6 +11,15 @@ NetworkState = namedtuple('NetworkState', ['graphdef', 'state', 'target_params']
 TrainState = namedtuple('TrainState', ['policy_state', 'nu_state', 'mu_state', 'step'])
 Model = namedtuple('Model', ['network', 'optimizer', 'target_network'])
 
+def alpha_scalarization(rewards, alpha):
+    # rewards: (batch, n_objectives), all > 0
+    eps = 1e-8  # avoid zero
+    x = jnp.clip(rewards, a_min=eps)
+    if alpha == 1:
+        return jnp.sum(jnp.log(x), axis=1, keepdims=True)  # shape (batch,1)
+    else:
+        return jnp.sum(x ** (1 - alpha) / (1 - alpha), axis=1, keepdims=True)  # shape (batch,1)
+
 def get_model(state: NetworkState) -> Model:
     network, optimizer = nnx.merge(state.graphdef, state.state)
     _, other_variables = state.state.split(nnx.Param, ...)
@@ -95,7 +104,7 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
     init_states = batch.init_states
     mask = batch.masks.astype(jnp.float32)
     
-    # Check if using discrete actions (extracted early for closure capture)
+    # Check if using discrete actions
     is_discrete = getattr(config, 'is_discrete', False)
     
     policy, policy_optim, _ = get_model(train_state.policy_state)
@@ -111,7 +120,8 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
         init_nu = nu_network(init_states)
         mu = mu_network() 
         k = 1.0 / (mu+1e-8) 
-        weighted_rewards = (rewards @ mu).reshape(-1, 1)
+        #weighted_rewards = (rewards @ mu).reshape(-1, 1)
+        weighted_rewards = alpha_scalarization(rewards, config.alpha)
         # For terminal states, don't bootstrap from next state (mask = 0 for terminals)
         e = (weighted_rewards + gamma * mask * next_nu - nu)
         w = jax.nn.relu(f_derivative_inverse(e / beta, f_divergence))
@@ -156,7 +166,8 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
             if log_probs.ndim == 1:
                 log_probs = log_probs.reshape(-1, 1)
         
-        weighted_rewards = (rewards @ mu).reshape(-1, 1)
+        #weighted_rewards = (rewards @ mu).reshape(-1, 1)
+        weighted_rewards = alpha_scalarization(rewards, config.alpha)
         nu_val = nu_network(states)
         next_nu = nu_network(next_states)
         e_val = (weighted_rewards + gamma * next_nu - nu_val)
@@ -196,5 +207,5 @@ def save_model(train_state: TrainState, path: str):
 def load_model(path: str, config) -> TrainState:
     checkpointer = orbax.PyTreeCheckpointer()
     train_state = init_train_state(config)
-    train_state =  checkpointer.restore(path, item= train_state)
+    train_state = checkpointer.restore(path, item=train_state)
     return train_state

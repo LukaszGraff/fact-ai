@@ -37,19 +37,19 @@ python main_fourroom.py \
     --divergence CHI \
     --env_name MO-FourRoom-v2 \
     --quality amateur \
-    --beta 0.01 \
+    --beta 0.001 \
     --seed 1984 \
     --preference_dist uniform \
     --eval_episodes 10 \
     --batch_size 256 \
-    --hidden_dim 128 \
-    --num_layers 3 \
-    --total_train_steps 10000 \
+    --hidden_dim 256 \
+    --num_layers 2 \
+    --total_train_steps 100000 \
     --log_interval 1000 \
-    --normalize_reward True \
+    --normalize_reward False \
     --max_seq_len 400 \
-    --policy_lr 1e-3 \
-    --nu_lr 1e-4 \
-    --mu_lr 1e-4 \
+    --policy_lr 3e-4 \
+    --nu_lr 3e-4 \
+    --mu_lr 3e-4 \
     --gamma 0.99 \
     --save_model_mode last

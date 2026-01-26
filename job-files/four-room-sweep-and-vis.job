@@ -17,7 +17,7 @@ set -euo pipefail
 # Single-file sweep launcher + worker.
 #
 # Usage:
-#   sbatch four-room-sweep-and-aggregate.job
+#   sbatch four-room-sweep-and-vis.job
 #
 # What it does:
 #  1) Launcher mode (default): submits an array of 1000 training jobs
@@ -136,14 +136,14 @@ if [[ "$MODE" == "launcher" ]]; then
   TRAIN_JOB_ID=$(sbatch --parsable \
     --array=0-$((ARRAY_SIZE-1))%$ARRAY_PARALLELISM \
     --export=MODE=train,SWEEP_ID="$SWEEP_ID" \
-    four-room-sweep-and-aggregate.job)
+    job-files/four-room-sweep-and-vis.job)
 
   echo "Submitted training array job: $TRAIN_JOB_ID"
 
   VIS_JOB_ID=$(sbatch --parsable \
     --dependency=afterok:${TRAIN_JOB_ID} \
     --export=MODE=aggregate,SWEEP_ID="$SWEEP_ID" \
-    four-room-sweep-and-aggregate.job)
+    job-files/four-room-sweep-and-vis.job)
 
   echo "Submitted aggregate job: $VIS_JOB_ID (depends on $TRAIN_JOB_ID)"
   echo "Sweep directory: ./results/$SWEEP_ID"

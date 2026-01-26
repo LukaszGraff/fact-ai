@@ -1,11 +1,16 @@
 import argparse
 import csv
 import json
-import os
 import re
 from collections import defaultdict
 from types import SimpleNamespace
+
+import os
+import sys
+# for relative imports
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from FairDICE import get_model, load_model
+
 import gym
 import jax
 import numpy as np

@@ -9,8 +9,8 @@ import numpy as np
 import gym
 import jax
 import jax.numpy as jnp
-from FairDICE import init_train_state, get_model
-from FairDICE import load_model
+from FairDICE import init_train_state, get_model as fairdice_get_model
+from FairDICE import load_model as fairdice_load_model
 from utils import normalization
 from types import SimpleNamespace
 import argparse
@@ -33,6 +33,12 @@ def _load_normalization_from_data(env_name: str, quality: str = "amateur", prefe
     state_mean = all_states.mean(axis=0)
     state_std = all_states.std(axis=0) + 1e-8
     return state_mean, state_std
+
+
+def _select_model_fns(config):
+    learner = getattr(config, "learner", None)
+    # Currently only FairDICE is supported
+    return fairdice_load_model, fairdice_get_model
 
 
 def _resolve_run_dirs_with_models(sweep_dir: str):
@@ -124,12 +130,22 @@ def _load_config_for_run(run_dir: str, env, fallback_state_mean, fallback_state_
     config.is_discrete = True
     return config
 
-def visualize_episode(env, policy, config, num_steps=400, is_discrete=True, use_greedy=True, rng_key=None):
+def visualize_episode(
+    env,
+    policy,
+    config,
+    num_steps=400,
+    is_discrete=True,
+    use_greedy=True,
+    rng_key=None,
+    action_sampler="policy",
+):
     """Run one episode and collect trajectory data.
     
     Args:
         use_greedy: If True, use argmax (greedy). If False, sample from distribution (stochastic).
         rng_key: JAX random key for stochastic sampling. Required if use_greedy=False.
+        action_sampler: "policy" to use the model policy, "random_uniform" for uniform random actions.
     """
     state = env.reset()
     trajectory = {
@@ -144,31 +160,34 @@ def visualize_episode(env, policy, config, num_steps=400, is_discrete=True, use_
 
     for step in range(num_steps):
         
-        # Normalize state
-        s_t = normalization(state, config.state_mean, config.state_std)
-        s_t = s_t.reshape(1, -1)  # Add batch dimension
-        
-        # Get action from policy
-        output = policy(s_t)
-        
-        if is_discrete:
-            # DiscretePolicy returns a Categorical distribution
-            dist = output
-            if use_greedy:
-                # Greedy: take argmax of logits
-                action = int(jnp.argmax(dist.logits[0]))
-            else:
-                # Stochastic: sample from the policy's probability distribution
-                if rng_key is not None:
-                    rng_key, subkey = jax.random.split(rng_key)
-                    action = int(jax.random.categorical(subkey, dist.logits[0]))
-                else:
-                    # Fallback to numpy sampling if no JAX key provided
-                    probs_np = np.array(jax.nn.softmax(dist.logits[0]))
-                    action = int(np.random.choice(len(probs_np), p=probs_np))
+        if action_sampler == "random_uniform":
+            action = env.action_space.sample()
         else:
-            dist = output
-            action = float(dist.mean()[0])
+            # Normalize state
+            s_t = normalization(state, config.state_mean, config.state_std)
+            s_t = s_t.reshape(1, -1)  # Add batch dimension
+
+            # Get action from policy
+            output = policy(s_t)
+
+            if is_discrete:
+                # DiscretePolicy returns a Categorical distribution
+                dist = output
+                if use_greedy:
+                    # Greedy: take argmax of logits
+                    action = int(jnp.argmax(dist.logits[0]))
+                else:
+                    # Stochastic: sample from the policy's probability distribution
+                    if rng_key is not None:
+                        rng_key, subkey = jax.random.split(rng_key)
+                        action = int(jax.random.categorical(subkey, dist.logits[0]))
+                    else:
+                        # Fallback to numpy sampling if no JAX key provided
+                        probs_np = np.array(jax.nn.softmax(dist.logits[0]))
+                        action = int(np.random.choice(len(probs_np), p=probs_np))
+            else:
+                dist = output
+                action = float(dist.mean()[0])
         
         # Step environment
         next_state, _, done, info = env.step(action)
@@ -188,15 +207,16 @@ def visualize_episode(env, policy, config, num_steps=400, is_discrete=True, use_
     return trajectory
 
 
-def _add_normalized_episode_visits(heatmap, states, grid_size):
-    """Accumulate per-episode normalized visitation counts into heatmap."""
+def _add_normalized_episode_visits(heatmap, states, grid_size, per_state_cap=3):
+    """Accumulate per-episode visitation counts with per-state cap (no normalization)."""
     episode_map = np.zeros_like(heatmap, dtype=np.float64)
     for x, y in states:
         if 0 <= int(x) < grid_size and 0 <= int(y) < grid_size:
-            episode_map[int(y), int(x)] += 1.0
-    total = episode_map.sum()
-    if total > 0:
-        heatmap += episode_map / total
+            y_idx = int(y)
+            x_idx = int(x)
+            if episode_map[y_idx, x_idx] < per_state_cap:
+                episode_map[y_idx, x_idx] += 1.0
+    heatmap += episode_map
     return heatmap
 
 def create_static_visualization(trajectory, env, save_path=None):
@@ -317,6 +337,7 @@ def create_policy_heatmap_visualization(
     title="Policy Visualization",
     show=True,
     policy_probs=None,
+    per_state_cap=3,
 ):
     """Create a paper-style heatmap showing policy arrows and state visitation.
     
@@ -336,7 +357,7 @@ def create_policy_heatmap_visualization(
         if trajectories is not None:
             for trajectory in trajectories:
                 heatmap = _add_normalized_episode_visits(
-                    heatmap, trajectory['states'], grid_size
+                    heatmap, trajectory['states'], grid_size, per_state_cap=per_state_cap
                 )
     
     # Normalize heatmap to [0, 1]
@@ -451,6 +472,7 @@ def _aggregate_sweep_policy_heatmap(
     stochastic: bool,
     limit_models: Optional[int],
     output_path: str,
+    per_state_cap: int,
 ):
     unwrapped = env.unwrapped
     grid_size = env.grid_size
@@ -476,8 +498,9 @@ def _aggregate_sweep_policy_heatmap(
     for idx, run_dir in enumerate(run_dirs):
         model_dir = os.path.join(run_dir, 'model')
         config = _load_config_for_run(run_dir, env, fallback_mean, fallback_std)
-        train_state = load_model(os.path.abspath(model_dir), config)
-        policy, _, _ = get_model(train_state.policy_state)
+        load_model_fn, get_model_fn = _select_model_fns(config)
+        train_state = load_model_fn(os.path.abspath(model_dir), config)
+        policy, _, _ = get_model_fn(train_state.policy_state)
         policy.eval()
 
         grid_states = []
@@ -510,7 +533,7 @@ def _aggregate_sweep_policy_heatmap(
                 rng_key=ep_key,
             )
             heatmap = _add_normalized_episode_visits(
-                heatmap, traj['states'], grid_size
+                heatmap, traj['states'], grid_size, per_state_cap=per_state_cap
             )
 
         if (idx + 1) % 50 == 0:
@@ -536,6 +559,7 @@ def _aggregate_sweep_policy_heatmap(
         title="Aggregate State Visitation and Policy Visualization",
         show=False,
         policy_probs=policy_probs,
+        per_state_cap=per_state_cap,
     )
 
 def main():
@@ -546,12 +570,18 @@ def main():
     parser.add_argument("--episodes_per_model", type=int, default=5, help="(Sweep mode) episodes per model")
     parser.add_argument("--limit_models", type=int, default=None, help="(Sweep mode) optional cap for quick tests")
     parser.add_argument("--output", type=str, default=None, help="Output image path (defaults: policy_heatmap.png or aggregate_policy_heatmap.png)")
+    parser.add_argument("--per_state_cap", type=int, default=1, help="Per-episode cap for state visits in heatmaps.")
     parser.add_argument("--num_episodes", type=int, default=100, help="Number of episodes to visualize")
     parser.add_argument("--max_steps", type=int, default=100, help="Max steps per episode")
     parser.add_argument("--env_name", type=str, default="MO-FourRoom-v2", help="Environment name")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--random_policy", action="store_true", help="Use random policy instead of trained")
     parser.add_argument("--stochastic", action="store_true", help="Use stochastic action selection (sample from policy) instead of greedy")
+    parser.add_argument(
+        "--uniform_random",
+        action="store_true",
+        help="Visualize the uniform random behavior policy used for data collection",
+    )
     
     args = parser.parse_args()
     
@@ -571,6 +601,7 @@ def main():
             stochastic=args.stochastic,
             limit_models=args.limit_models,
             output_path=output_path,
+            per_state_cap=args.per_state_cap,
         )
         return
     
@@ -599,7 +630,25 @@ def main():
     
     # Try to load config from saved model directory
     config = None
-    if args.model_path is None and not args.random_policy:
+    if args.model_path is not None and not args.random_policy and not args.uniform_random:
+        run_dir = os.path.abspath(os.path.join(args.model_path, os.pardir))
+        config_path = os.path.join(run_dir, "config.json")
+        if os.path.exists(config_path):
+            import json
+            with open(config_path, "r") as f:
+                config_dict = json.load(f)
+            if "state_mean" in config_dict:
+                config_dict["state_mean"] = np.array(config_dict["state_mean"])
+            if "state_std" in config_dict:
+                config_dict["state_std"] = np.array(config_dict["state_std"])
+            if "reward_min" in config_dict and config_dict["reward_min"] is not None:
+                config_dict["reward_min"] = np.array(config_dict["reward_min"])
+            if "reward_max" in config_dict and config_dict["reward_max"] is not None:
+                config_dict["reward_max"] = np.array(config_dict["reward_max"])
+            config = SimpleNamespace(**config_dict)
+            print(f"Loaded config from {config_path}")
+            print(f"  hidden_dims: {config.hidden_dims}, num_layers: {config.num_layers if hasattr(config, 'num_layers') else 'N/A'}")
+    elif args.model_path is None and not args.random_policy and not args.uniform_random:
         # Find the model directory first to load config
         if os.path.isdir(args.results_dir):
             candidate_paths = []
@@ -658,7 +707,7 @@ def main():
         config.state_std = state_std
     
     # Resolve model path if not provided
-    if args.model_path is None and not args.random_policy:
+    if args.model_path is None and not args.random_policy and not args.uniform_random:
         if os.path.isdir(args.results_dir):
             candidate_paths = []
             for entry in os.listdir(args.results_dir):
@@ -682,10 +731,14 @@ def main():
         args.model_path = os.path.abspath(args.model_path)
 
     # Get policy
-    if args.random_policy or args.model_path is None:
+    if args.uniform_random:
+        print("Using uniform random behavior policy for visualization...")
+        train_state = None
+        policy, _, _ = None, None, None
+    elif args.random_policy or args.model_path is None:
         print("Using random policy for visualization...")
         train_state = init_train_state(config)
-        policy, _, _ = get_model(train_state.policy_state)
+        policy, _, _ = fairdice_get_model(train_state.policy_state)
     else:
         print(f"Loading model from {args.model_path}...")
         if not os.path.exists(args.model_path):
@@ -693,11 +746,11 @@ def main():
             return
         else:
             try:
-                from FairDICE import load_model
+                load_model_fn, get_model_fn = _select_model_fns(config)
                 print("Calling load_model...")
-                train_state = load_model(args.model_path, config)
+                train_state = load_model_fn(args.model_path, config)
                 print("load_model returned. Calling get_model...")
-                policy, _, _ = get_model(train_state.policy_state)
+                policy, _, _ = get_model_fn(train_state.policy_state)
                 print("Model loaded successfully!")
             except Exception as e:
                 import traceback
@@ -714,7 +767,17 @@ def main():
     
     for ep in range(args.num_episodes):
         rng_key, ep_key = jax.random.split(rng_key)
-        trajectory = visualize_episode(env, policy, config, num_steps=args.max_steps, is_discrete=True, use_greedy=use_greedy, rng_key=ep_key)
+        action_sampler = "random_uniform" if args.uniform_random else "policy"
+        trajectory = visualize_episode(
+            env,
+            policy,
+            config,
+            num_steps=args.max_steps,
+            is_discrete=True,
+            use_greedy=use_greedy,
+            rng_key=ep_key,
+            action_sampler=action_sampler,
+        )
         trajectories.append(trajectory)
         
         # Calculate total rewards per objective
@@ -729,15 +792,39 @@ def main():
     print("\nGenerating visualizations...")
     
     # Paper-style policy heatmap with arrows
-    output_path = args.output or "policy_heatmap.png"
+    if args.output is not None:
+        output_path = args.output
+    else:
+        if args.uniform_random:
+            filename = "uniform_random_policy_heatmap.png"
+        else:
+            filename = "policy_heatmap.png"
+        if args.model_path is not None:
+            output_path = os.path.join(os.path.dirname(args.model_path), filename)
+        else:
+            output_path = filename
+
+    policy_probs = None
+    if args.uniform_random:
+        grid_size = env.grid_size
+        action_dim = int(env.action_space.n)
+        policy_probs = np.zeros((grid_size, grid_size, action_dim), dtype=np.float32)
+        walls = getattr(env.unwrapped, "walls", set())
+        for x in range(grid_size):
+            for y in range(grid_size):
+                if (x, y) in walls:
+                    continue
+                policy_probs[y, x, :] = 1.0 / action_dim
     create_policy_heatmap_visualization(
         policy,
         config,
         env,
         trajectories,
         save_path=output_path,
-        title="State Visitation and Policy Visualization",
+        title="Uniform Random Behavior Policy" if args.uniform_random else "State Visitation and Policy Visualization",
         show=(args.output is None),
+        policy_probs=policy_probs,
+        per_state_cap=args.per_state_cap,
     )
     
     # Also generate the simple visitation heatmap

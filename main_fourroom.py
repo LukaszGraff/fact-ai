@@ -21,7 +21,13 @@ from datetime import datetime
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--learner", type=str, default="FairDICE", help="Learner type")
+    parser.add_argument(
+        "--learner",
+        type=str,
+        default="FairDICE",
+        choices=["FairDICE"],
+        help="Learner type",
+    )
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
     parser.add_argument("--beta", type=float, default=0.001, help="beta hyperparameter")
@@ -63,6 +69,7 @@ def main():
     # CQL baseline args removed.
     parser.add_argument("--seed", type=int, default=0, help="Random seed")    
     parser.add_argument("--tag", type=str, default="", help="Tag for the experiment")
+    parser.add_argument("--alpha", type=float, default=1.0, help="Alpha parameter to control the optimiazation objective. alpha=0: Utilitarian Welfare; alpha=1: Nash Social Welfare")
     
     args, unknown = parser.parse_known_args()
     config = SimpleNamespace(**vars(args))
@@ -212,10 +219,15 @@ def main():
 
         # Show policy loss during training (survives tqdm + Slurm stdout buffering).
         policy_loss_value = float(np.asarray(update_info["policy_loss"][-1]))
-        nu_loss_value = float(np.asarray(update_info["nu_loss"][-1]))
-        mu_value = np.asarray(update_info["mu"][-1]).reshape(-1)
-        mu_str = np.array2string(mu_value, precision=4, separator=", ")
-        tqdm.write(f"Step {step}: policy_loss={policy_loss_value:.6f} | nu_loss={nu_loss_value:.6f} | mu={mu_str}")
+        log_parts = [f"policy_loss={policy_loss_value:.6f}"]
+        if "nu_loss" in update_info:
+            nu_loss_value = float(np.asarray(update_info["nu_loss"][-1]))
+            log_parts.append(f"nu_loss={nu_loss_value:.6f}")
+        if "mu" in update_info:
+            mu_value = np.asarray(update_info["mu"][-1]).reshape(-1)
+            mu_str = np.array2string(mu_value, precision=4, separator=", ")
+            log_parts.append(f"mu={mu_str}")
+        tqdm.write(f"Step {step}: " + " | ".join(log_parts))
         sys.stdout.flush()
 
         if config.save_model_mode == "best_nsw":
@@ -250,9 +262,6 @@ def main():
                     f"New best model at step {step} with NSW(score_of_mean_returns)={best_nsw_score:.6f} (avg_returns={avg_returns})"
                 )
         
-        # (Optional) keep any extra evaluation-derived metrics here if you want,
-        # but do not use them for checkpoint selection.
-        
         if config.wandb:
             for key, value in update_info.items():
                 if "loss" in key or "grad" in key or "debug" in key:
@@ -265,7 +274,7 @@ def main():
         wandb.finish()
     
     if config.save_path:
-        # Save config as JSON for later use (e.g., visualization)
+        # Save config as JSON for later use
         import json
         config_dict = {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in vars(config).items()}
         with open(os.path.join(save_dir, "config.json"), "w") as f:

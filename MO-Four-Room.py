@@ -7,7 +7,7 @@ from gym import spaces
 from os import path
 
 class FourRoomEnv(gym.Env):
-    def __init__(self, *, horizontal_wall_y=6, horizontal_wall_thickness=1, slip_prob=0.1):
+    def __init__(self, *, horizontal_wall_y=6, horizontal_wall_thickness=1, slip_prob=0.1, max_steps=500):
         self.grid_size = 13
         self.np_random = np.random.RandomState()
         self.agent_start = (2, 2)
@@ -19,7 +19,7 @@ class FourRoomEnv(gym.Env):
         self.action_space = gym.spaces.Discrete(4)  # up, down, left, right
         self.observation_space = gym.spaces.Box(low=0, high=self.grid_size-1, shape=(2,), dtype=np.int32)
         self.step_count = 0
-        self.max_steps = 200
+        self.max_steps = max_steps
         
         # define goals
         self.goals = [
@@ -112,7 +112,7 @@ class FourRoomEnv(gym.Env):
 
         self.step_count += 1
         truncated = self.step_count >= self.max_steps
-        obs = np.array(self.agent_pos)
+        obs = np.array(self.agent_pos, dtype=np.int32)
         info = {'obj': reward}
         if truncated or terminated:
             return obs, 0.0, terminated, truncated, info
@@ -149,7 +149,7 @@ class FourRoomEnv(gym.Env):
         self.agent_pos = (2, 2)
         self.step_count = 0
         self.visited = set()
-        return np.array(self.agent_pos), {}
+        return np.array(self.agent_pos, dtype=np.int32), {}
 
     def render(self, mode='human'):
         # Implement the render function to visualize the environment

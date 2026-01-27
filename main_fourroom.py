@@ -25,13 +25,12 @@ sys.path.insert(0, str(_here.parent))
 from FairDICE import (
     FDivergence,
     TrainState,
-    f,
-    f_derivative_inverse,
-    get_model,
-    init_train_state,
-    save_model,
-    train_step,
+    get_model as fairdice_get_model,
+    init_train_state as fairdice_init_train_state,
+    save_model as fairdice_save_model,
+    train_step as fairdice_train_step,
 )
+import FairDICE_fixed as fairdice_fixed
 from buffer import Buffer
 from evaluation import evaluate_policy
 from fourroom_registration import ensure_fourroom_registered
@@ -87,7 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--nu_lr", type=float, default=3e-4, help="Nu learning rate")
     parser.add_argument("--policy_lr", type=float, default=3e-4, help="Policy learning rate")
-    parser.add_argument("--mu_lr", type=float, default=3e-4, help="Mu learning rate")
+    parser.add_argument("--mu_lr", type=float, default=1e-4, help="Mu learning rate")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size for training")
     parser.add_argument(
         "--quality",
@@ -103,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="uniform",
         help="Preference distribution",
     )
-    parser.add_argument("--max_seq_len", type=int, default=200, help="Max sequence length in trajectories")
+    parser.add_argument("--max_seq_len", type=int, default=500, help="Max sequence length in trajectories")
     parser.add_argument(
         "--normalize_reward",
         type=bool,
@@ -131,6 +130,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save_path", type=str, default="./results", help="Path to save the model checkpoint")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--tag", type=str, default="", help="Tag for the experiment")
+    parser.add_argument(
+        "--debug_train",
+        type=bool,
+        default=False,
+        help="Print extra per-interval training diagnostics",
+    )
     parser.add_argument(
         "--mu_fixed_path",
         type=str,
@@ -206,7 +211,9 @@ def _reward_statistics(trajs):
 
 
 def _ensure_dataset(config):
-    data_path = f"./data/{config.env_name}/{config.env_name}_50000_{config.quality}_{config.preference_dist}.pkl"
+    data_path = getattr(config, "data_path", None)
+    if not data_path:
+        data_path = f"./data/{config.env_name}/{config.env_name}_50000_{config.quality}_{config.preference_dist}.pkl"
     if not os.path.exists(data_path):
         print(f"Data not found at {data_path}. Generating data...")
         ensure_fourroom_registered()
@@ -217,6 +224,9 @@ def _ensure_dataset(config):
             num_trajectories=300,
             quality=config.quality,
             preference_dist=config.preference_dist,
+            max_steps=config.max_seq_len,
+            seed=getattr(config, "data_seed", None),
+            save_path=data_path,
         )
     return data_path
 
@@ -239,131 +249,9 @@ def _resolve_mu_vector(config):
         config.mu_fixed_vector = vector
 
 
-def _set_mu_state(train_state: TrainState, mu_vector: np.ndarray) -> TrainState:
-    mu_network, mu_optim, _ = get_model(train_state.mu_state)
-    mu_network.mu = jnp.asarray(mu_vector, dtype=jnp.float32)
-    mu_state = nnx.state((mu_network, mu_optim))
-    mu_target = mu_state.filter(nnx.Param)
-    return train_state._replace(
-        mu_state=train_state.mu_state._replace(state=mu_state, target_params=mu_target)
-    )
-
-
 def _current_mu(train_state: TrainState) -> np.ndarray:
-    mu_network, _, _ = get_model(train_state.mu_state)
+    mu_network, _, _ = fairdice_get_model(train_state.mu_state)
     return np.array(mu_network())
-
-
-def train_step_fixed_mu(config, train_state: TrainState, batch, key: jax.random.PRNGKey, fixed_mu):
-    key, subkey = jax.random.split(key)
-    step = train_state.step
-    gamma = config.gamma
-    beta = config.beta
-    rewards = batch.rewards
-    states = batch.states
-    next_states = batch.next_states
-    init_states = batch.init_states
-    mask = batch.masks.astype(jnp.float32)
-
-    policy, policy_optim, _ = get_model(train_state.policy_state)
-    nu_network, nu_optim, _ = get_model(train_state.nu_state)
-
-    f_divergence = FDivergence[config.divergence]
-    eps = jax.random.uniform(subkey)
-    mu = jnp.asarray(fixed_mu, dtype=jnp.float32)
-
-    def nu_loss_fn(nu_network):
-        nu = nu_network(states)
-        next_nu = nu_network(next_states)
-        init_nu = nu_network(init_states)
-        k = 1.0 / (mu + 1e-8)
-        weighted_rewards = (rewards @ mu).reshape(-1, 1)
-        e = weighted_rewards + gamma * next_nu - nu
-        w = jax.nn.relu(f_derivative_inverse(e / beta, f_divergence))
-        loss_1 = (1 - gamma) * jnp.mean(init_nu)
-        masked_term = mask * (w * e - beta * f(w, f_divergence))
-        loss_2 = jnp.sum(masked_term) / (jnp.sum(mask) + 1e-8)
-        loss_3 = jnp.sum(jnp.log(k) - mu * k)
-
-        def nu_scalar(x):
-            return jnp.squeeze(nu_network(x), -1)
-
-        interpolated_observations = init_states * eps + next_states * (1 - eps)
-        grad_fn = jax.vmap(jax.grad(nu_scalar), in_axes=0)
-        nu_grad = grad_fn(interpolated_observations)
-        grad_norm = jnp.linalg.norm(nu_grad, axis=1)
-        grad_penalty = config.gradient_penalty_coeff * jnp.mean(jax.nn.relu(grad_norm - 5.0) ** 2)
-
-        nu_loss = loss_1 + loss_2 + loss_3 + grad_penalty
-        return nu_loss, (w, e, grad_penalty)
-
-    (nu_loss, (w, e, grad_penalty)), nu_grads = nnx.value_and_grad(
-        nu_loss_fn, argnums=0, has_aux=True
-    )(nu_network)
-    nu_optim.update(nu_network, nu_grads)
-    nu_state_ = nnx.state((nu_network, nu_optim))
-
-    is_discrete = getattr(config, "is_discrete", False)
-
-    def policy_loss_fn(policy_module):
-        output = policy_module(states)
-        if is_discrete:
-            logits, probs = output
-            log_probs = jnp.log(probs + 1e-8)
-            actions_int = batch.actions.astype(jnp.int32)
-            log_probs = log_probs[jnp.arange(log_probs.shape[0]), actions_int].reshape(-1, 1)
-        else:
-            dist = output
-            log_probs = dist.log_prob(batch.actions)
-            if len(log_probs.shape) == 1:
-                log_probs = log_probs.reshape(-1, 1)
-
-        weighted_rewards = (rewards @ mu).reshape(-1, 1)
-        nu_val = nu_network(states)
-        next_nu = nu_network(next_states)
-        e_val = weighted_rewards + gamma * next_nu - nu_val
-        # No max-shift; avoids zeroing weights.
-        stable_w_pre = jax.lax.stop_gradient(
-            jax.nn.relu(f_derivative_inverse(e_val / beta, f_divergence))
-        )
-        stable_w_mean_before_norm = jnp.mean(stable_w_pre)
-        stable_w_pct_nonzero = jnp.mean(stable_w_pre > 0)
-        stable_w = stable_w_pre / (stable_w_mean_before_norm + 1e-8)
-        policy_loss = -(mask * stable_w * log_probs).sum() / (jnp.sum(mask) + 1e-8)
-        actor_stats = {
-            "e_val_mean": jnp.mean(e_val),
-            "e_val_std": jnp.std(e_val),
-            "e_val_min": jnp.min(e_val),
-            "e_val_max": jnp.max(e_val),
-            "stable_w_mean": jnp.mean(stable_w),
-            "stable_w_std": jnp.std(stable_w),
-            "stable_w_min": jnp.min(stable_w),
-            "stable_w_max": jnp.max(stable_w),
-            "stable_w_pct_nonzero": stable_w_pct_nonzero,
-            "stable_w_mean_before_norm": stable_w_mean_before_norm,
-        }
-        return policy_loss, (log_probs, actor_stats)
-
-    (policy_loss, (_, actor_stats)), policy_grads = nnx.value_and_grad(
-        policy_loss_fn, has_aux=True
-    )(policy)
-    policy_optim.update(policy, policy_grads)
-    policy_state_ = nnx.state((policy, policy_optim))
-
-    train_state = train_state._replace(
-        policy_state=train_state.policy_state._replace(state=policy_state_),
-        nu_state=train_state.nu_state._replace(state=nu_state_),
-        step=step + 1,
-    )
-
-    update_info = {
-        "policy_loss": policy_loss,
-        "nu_loss": nu_loss,
-        "mu": mu,
-        "grad_penalty": grad_penalty,
-    }
-    update_info.update(actor_stats)
-    return train_state, update_info
 
 
 def run_training(config: SimpleNamespace):
@@ -454,7 +342,6 @@ def run_training(config: SimpleNamespace):
     random.seed(config.seed)
     np.random.seed(config.seed)
     key = jax.random.PRNGKey(config.seed)
-    train_state = init_train_state(config)
 
     if config.freeze_mu is None:
         config.freeze_mu = config.learner == "FairDICEFixed"
@@ -464,16 +351,17 @@ def run_training(config: SimpleNamespace):
     if config.learner == "FairDICEFixed":
         if getattr(config, "mu_fixed_vector", None) is None:
             raise ValueError("FairDICEFixed requires --mu_fixed or --mu_fixed_path")
-        train_state = _set_mu_state(train_state, config.mu_fixed_vector)
-        fixed_mu = jnp.asarray(config.mu_fixed_vector, dtype=jnp.float32)
-
-        def step_fn(cfg, state, data, rng):
-            return train_step_fixed_mu(cfg, state, data, rng, fixed_mu)
-
-        train_step_fn = step_fn
+        config.fixed_mu = config.mu_fixed_vector
+        train_state = fairdice_fixed.init_train_state(config)
+        train_step_fn = fairdice_fixed.train_step_fixed
+        get_model_fn = fairdice_fixed.get_model
+        save_model_fn = fairdice_fixed.save_model
         print(f"[FairDICEFixed] Freezing mu at {config.mu_fixed_vector}")
     else:
-        train_step_fn = train_step
+        train_state = fairdice_init_train_state(config)
+        train_step_fn = fairdice_train_step
+        get_model_fn = fairdice_get_model
+        save_model_fn = fairdice_save_model
 
     buffer = Buffer(batch)
     train_carry = (train_state, key)
@@ -501,65 +389,54 @@ def run_training(config: SimpleNamespace):
 
         train_carry, update_info = jax.lax.scan(train_body, (train_state, key), None, length=config.log_interval)
         train_state, key = train_carry
-        policy = get_model(train_state.policy_state)[0]
+        policy = get_model_fn(train_state.policy_state)[0]
 
         step = (iter_idx + 1) * config.log_interval
+        def _last_val(x):
+            return float(np.asarray(x[-1]))
+        def _last_arr(x):
+            return np.asarray(x[-1])
         policy_params = train_state.policy_state.state.filter(nnx.Param)
         nu_params = train_state.nu_state.state.filter(nnx.Param)
         if config.learner == "FairDICEFixed" and getattr(config, "mu_fixed_vector", None) is not None:
             mu_vector = np.array(config.mu_fixed_vector, dtype=np.float32)
         else:
             mu_vector = _current_mu(train_state)
-        print(
-            "[params] "
-            f"policy_l2={_pytree_l2_norm(policy_params):.4f} "
-            f"critic_l2={_pytree_l2_norm(nu_params):.4f} "
-            f"mu={np.round(mu_vector, 4)}"
-        )
-        if probe_states:
-            for label, probe_state in probe_states:
-                probe_norm = normalization(probe_state, config.state_mean, config.state_std)
-                logits, probs = policy(jnp.asarray(probe_norm))
-                probs_np = np.asarray(probs)
-                probs_flat = probs_np.reshape(-1)
-                argmax_action = int(np.argmax(probs_flat))
-                print(
-                    f"[probe] {label} probs={np.round(probs_flat, 3).tolist()} "
-                    f"argmax={argmax_action}"
-                )
-        if "stable_w_mean" in update_info:
-            def _last_val(x):
-                return float(np.asarray(x[-1]))
-            print(
-                "[actor stats] "
-                f"e_val mean={_last_val(update_info['e_val_mean']):.4f} "
-                f"std={_last_val(update_info['e_val_std']):.4f} "
-                f"min={_last_val(update_info['e_val_min']):.4f} "
-                f"max={_last_val(update_info['e_val_max']):.4f} | "
-                f"stable_w mean={_last_val(update_info['stable_w_mean']):.4f} "
-                f"std={_last_val(update_info['stable_w_std']):.4f} "
-                f"min={_last_val(update_info['stable_w_min']):.4f} "
-                f"max={_last_val(update_info['stable_w_max']):.4f} | "
-                f"pct_nonzero={_last_val(update_info['stable_w_pct_nonzero']):.4f}"
-            )
-        if "policy_loss" in update_info:
-            def _last_arr(x):
-                return np.asarray(x[-1])
+        if "policy_loss" in update_info and "nu_loss" in update_info:
             policy_loss_val = _last_val(update_info["policy_loss"])
             nu_loss_val = _last_val(update_info["nu_loss"])
-            grad_penalty_val = _last_val(update_info["grad_penalty"])
-            mu_vec = _last_arr(update_info["mu"])
-            mu_grad_vec = _last_arr(update_info.get("mu_grad", np.zeros_like(mu_vec)))
-            sample_batch = buffer.sample(jax.random.PRNGKey(int(step)), min(config.batch_size, 256))
-            sample_states = sample_batch.states
-            logits, probs = policy(sample_states)
-            mean_probs = np.asarray(probs).mean(axis=0)
-            print(f"Policy Loss: {policy_loss_val:.6f}")
-            print(f"  Nu Loss: {nu_loss_val:.6f}")
-            print(f"  Mu: {np.round(mu_vec, 6)}")
-            print(f"  Mu grad: {np.round(mu_grad_vec, 6)}")
-            print(f"  Grad Penalty: {grad_penalty_val:.6f}")
-            print(f"  Policy action probs: {np.round(mean_probs, 8)}")
+            grad_penalty_val = _last_val(update_info.get("grad_penalty", np.array([0.0])))
+            print(
+                f"[train] step={step} policy_loss={policy_loss_val:.6f} "
+                f"nu_loss={nu_loss_val:.6f} grad_penalty={grad_penalty_val:.6f} "
+                f"mu={np.round(mu_vector, 4)}"
+            )
+        if getattr(config, "debug_train", False):
+            print(
+                f"[debug] step={step} policy_l2={_pytree_l2_norm(policy_params):.4f} "
+                f"critic_l2={_pytree_l2_norm(nu_params):.4f}"
+            )
+            if "avg_w" in update_info and "avg_e" in update_info:
+                avg_w = _last_val(update_info["avg_w"])
+                avg_e = _last_val(update_info["avg_e"])
+                print(f"[debug] step={step} avg_w={avg_w:.6f} avg_e={avg_e:.6f}")
+            if probe_states:
+                for label, probe_state in probe_states:
+                    probe_norm = normalization(probe_state, config.state_mean, config.state_std)
+                    logits, probs = policy(jnp.asarray(probe_norm))
+                    probs_np = np.asarray(probs).reshape(-1)
+                    argmax_action = int(np.argmax(probs_np))
+                    print(
+                        f"[debug] probe={label} probs={np.round(probs_np, 3).tolist()} "
+                        f"argmax={argmax_action}"
+                    )
+            if getattr(config, "is_discrete", False):
+                sample_batch = buffer.sample(
+                    jax.random.PRNGKey(int(step)), min(config.batch_size, 256)
+                )
+                logits, probs = policy(sample_batch.states)
+                mean_probs = np.asarray(probs).mean(axis=0)
+                print(f"[debug] step={step} mean_action_probs={np.round(mean_probs, 6)}")
         eval_mode = getattr(config, "eval_mode", "greedy")
         eval_seed = getattr(config, "eval_seed", None)
         if eval_mode == "both":
@@ -604,9 +481,9 @@ def run_training(config: SimpleNamespace):
             print(f"[mu] current={np.round(mu_vector, 6)}")
 
         candidate_score = (
-            float(metrics["avg_discounted_normalized_nsw_score"]),
+            float(metrics["avg_normalized_nsw_score"]),
             float(metrics["goal_hit_rate"]),
-            float(metrics["avg_raw_discounted_usw_score"]),
+            float(metrics["avg_raw_usw_score"]),
         )
         if best_score is None or candidate_score > best_score:
             best_score = candidate_score
@@ -626,7 +503,7 @@ def run_training(config: SimpleNamespace):
         wandb.finish()
 
     final_state = best_train_state if best_train_state is not None else train_state
-    final_policy = get_model(final_state.policy_state)[0]
+    final_policy = get_model_fn(final_state.policy_state)[0]
     if config.learner == "FairDICEFixed" and getattr(config, "mu_fixed_vector", None) is not None:
         mu_vector = np.array(config.mu_fixed_vector, dtype=np.float32)
     else:
@@ -636,7 +513,7 @@ def run_training(config: SimpleNamespace):
     print(f"mu*: {mu_vector}")
 
     if config.save_path:
-        save_model(final_state, os.path.abspath(os.path.join(save_dir, "model")))
+        save_model_fn(final_state, os.path.abspath(os.path.join(save_dir, "model")))
 
     env.close()
     print(f"Training complete. Results saved to {save_dir}")

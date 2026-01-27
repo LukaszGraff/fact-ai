@@ -4,12 +4,14 @@ import jax
 
 class MuNetwork(nnx.Module):
     def __init__(self, config):
-        key = jax.random.PRNGKey(config.seed + 999)
-        init_values = jax.random.uniform(key, (config.reward_dim,), minval=-0.5, maxval=0.5)
-        self.mu_raw = nnx.Param(init_values)
+        init_value = getattr(config, "mu_init", None)
+        if init_value is None:
+            init_value = jnp.full((config.reward_dim,), 1.0)
+        self.mu = nnx.Param(jnp.array(init_value, dtype=jnp.float32))
         
     def __call__(self):
-        return jax.nn.softplus(self.mu_raw) + 0.1
+        mu_raw = nnx.softplus(self.mu)
+        return mu_raw / (jnp.sum(mu_raw) + 1e-8)
 
 class MLP(nnx.Module):
     def __init__(self, din, dout = 1, hidden_dims = [256, 256], activation = nnx.relu, rngs: nnx.Rngs = nnx.Rngs(0), activate_final: bool = False, dropout_rate: float = 0.0, layer_norm: bool = False):

@@ -8,15 +8,33 @@ import os
 from tqdm import tqdm
 from fourroom_registration import ensure_fourroom_registered
 
-def generate_offline_data(env_name, num_trajectories=300, quality='amateur', preference_dist='uniform', max_steps=200):
+def generate_offline_data(
+    env_name,
+    num_trajectories=300,
+    quality='amateur',
+    preference_dist='uniform',
+    max_steps=500,
+    seed=None,
+    save_path=None,
+):
     """Generate offline dataset by running random policy."""
     ensure_fourroom_registered()
     env = gym.make(env_name)
+    if hasattr(env, "unwrapped") and hasattr(env.unwrapped, "max_steps"):
+        env.unwrapped.max_steps = max_steps
+    if hasattr(env, "_max_episode_steps"):
+        env._max_episode_steps = max_steps
     
     trajectories = []
     
     for traj_idx in tqdm(range(num_trajectories), desc="Generating trajectories"):
-        reset_out = env.reset()
+        if seed is not None:
+            episode_seed = int(seed) + traj_idx
+            if hasattr(env.action_space, "seed"):
+                env.action_space.seed(episode_seed)
+            reset_out = env.reset(seed=episode_seed)
+        else:
+            reset_out = env.reset()
         if isinstance(reset_out, tuple):
             obs, _ = reset_out
         else:
@@ -59,10 +77,11 @@ def generate_offline_data(env_name, num_trajectories=300, quality='amateur', pre
     
     # Save
     os.makedirs(f"./data/{env_name}", exist_ok=True)
-    save_path = f"./data/{env_name}/{env_name}_50000_{quality}_{preference_dist}.pkl"
+    if save_path is None:
+        save_path = f"./data/{env_name}/{env_name}_50000_{quality}_{preference_dist}.pkl"
     with open(save_path, 'wb') as f:
         pickle.dump(trajectories, f)
     print(f"Saved {len(trajectories)} trajectories to {save_path}")
 
 if __name__ == "__main__":
-    generate_offline_data("MO-FourRoom-v2", num_trajectories=300)
+    generate_offline_data("MO-FourRoom-v2", num_trajectories=300, max_steps=500)

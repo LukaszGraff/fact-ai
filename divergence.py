@@ -4,6 +4,10 @@ import jax
 import jax.numpy as jnp
 
 
+SOFT_CHI_NEG_CLIP = -3.0
+SOFT_CHI_POS_CLIP = 10.0
+
+
 class FDivergence(str, Enum):
     KL = "KL"
     CHI = "Chi"
@@ -31,7 +35,9 @@ def f_derivative_inverse(y, f_divergence: FDivergence, t: float = 1.0):
     elif f_divergence == FDivergence.CHI:
         return y + 1.0
     elif f_divergence == FDivergence.SOFT_CHI:
-        return jnp.where(y < 0.0, jnp.exp(jnp.where(y < 0.0, y, 0.0)), y + 1)
+        y_neg = jnp.clip(y, SOFT_CHI_NEG_CLIP, 0.0)
+        y_pos = jnp.clip(y, 0.0, SOFT_CHI_POS_CLIP)
+        return jnp.where(y < 0.0, jnp.exp(y_neg), y_pos + 1.0)
     elif f_divergence == FDivergence.DUAL_DICE:
         raise ValueError(f"This function doesn't exist for {f_divergence}.")
     else:
@@ -51,4 +57,4 @@ def state_action_ratio(
     rewards = jnp.array(rewards)
 
     e = rewards + discount * next_nu - nu
-    return jax.nn.relu(f_derivative_inverse(e / beta, f_divergence))
+    return jax.nn.softplus(f_derivative_inverse(e / beta, f_divergence))

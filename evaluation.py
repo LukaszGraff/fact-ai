@@ -4,7 +4,10 @@ import jax
 import jax.numpy as jnp
 from utils import normalization, min_max_normalization
 import os
-import wandb
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 def _reset_env(env, seed):
     reset_out = env.reset(seed=seed) if "seed" in getattr(env.reset, "__code__", (None,)).co_varnames else env.reset()
@@ -36,6 +39,8 @@ def evaluate_policy(
     eval_mode="greedy",
     eval_seed=None,
 ):
+    if eval_seed is not None:
+        key = jax.random.PRNGKey(int(eval_seed))
     policy.eval()
     raw_returns = []
     normalized_returns = []
@@ -53,17 +58,21 @@ def evaluate_policy(
         output = policy(observation)
         if is_discrete:
             # For discrete policies: output is (logits, probs)
-            logits, _ = output
+            logits, probs = output
             if eval_mode == "greedy":
                 action = jnp.argmax(logits, axis=-1)
                 action = jnp.reshape(action, ())
             else:
-                action = jax.random.categorical(rng, logits, axis=-1)
+                action = jax.random.categorical(rng, jnp.log(probs + 1e-8), axis=-1)
         else:
             # For continuous policies: output is a distribution
             dist = output
-            action = dist.mean()  # deterministic action
-            action = action.flatten()
+            if eval_mode == "greedy":
+                action = dist.mean()
+                action = action.flatten()
+            else:
+                action = dist.sample(seed=rng)
+                action = action.flatten()
         return action
 
     steps_list = []
@@ -72,13 +81,8 @@ def evaluate_policy(
     trace_steps = []
     trace_done = None
     for iter in range(num_episodes):
-        try:
-            env.seed(iter)
-            state = env.reset()
-            if isinstance(state, tuple):
-                state, _ = state
-        except Exception:
-            state = _reset_env(env, iter)
+        episode_seed = iter if eval_seed is None else int(eval_seed) + iter
+        state = _reset_env(env, episode_seed)
         done = False
         steps = 0
         raw_rewards_list = []
@@ -156,6 +160,10 @@ def evaluate_policy(
         discounted_raw_returns.append(np.sum(discounted_raw_rewards_list, axis=0))
         discounted_normalized_returns.append(np.sum(discounted_normalized_rewards_list, axis=0))
 
+    raw_returns = np.array(raw_returns)
+    normalized_returns = np.array(normalized_returns)
+    discounted_raw_returns = np.array(discounted_raw_returns)
+    discounted_normalized_returns = np.array(discounted_normalized_returns)
     avg_raw_returns = np.mean(raw_returns, axis=0)
     avg_normalized_returns = np.mean(normalized_returns, axis=0)
     avg_discounted_raw_returns = np.mean(discounted_raw_returns, axis=0)
@@ -165,11 +173,15 @@ def evaluate_policy(
     per_goal_hit_rate = per_goal_hits / max(num_episodes, 1)
     avg_termination_step = float(np.mean(termination_steps)) if termination_steps else 0.0
     eps = 1e-8
-    avg_raw_nsw_score = float(np.sum(np.log(np.clip(avg_raw_returns, eps, None))))
-    avg_normalized_nsw_score = float(np.sum(np.log(np.clip(avg_normalized_returns, eps, None))))
-    avg_discounted_raw_nsw_score = float(np.sum(np.log(np.clip(avg_discounted_raw_returns, eps, None))))
+    avg_raw_nsw_score = float(np.sum(np.log(np.clip(np.mean(raw_returns, axis=0), eps, None))))
+    avg_normalized_nsw_score = float(
+        np.sum(np.log(np.clip(np.mean(normalized_returns, axis=0), eps, None)))
+    )
+    avg_discounted_raw_nsw_score = float(
+        np.sum(np.log(np.clip(np.mean(discounted_raw_returns, axis=0), eps, None)))
+    )
     avg_discounted_normalized_nsw_score = float(
-        np.sum(np.log(np.clip(avg_discounted_normalized_returns, eps, None)))
+        np.sum(np.log(np.clip(np.mean(discounted_normalized_returns, axis=0), eps, None)))
     )
     avg_raw_usw_score = np.mean(np.sum(raw_returns, axis=1))
     avg_normalized_usw_score = np.mean(np.sum(normalized_returns, axis=1))
@@ -221,33 +233,19 @@ def evaluate_policy(
                 "eval/avg_raw_usw_score": avg_raw_usw_score,
             }, step=t_env)
         else:
-            print(f"Eval episodes: {num_episodes}")
-            print(f"Avg raw returns: {avg_raw_returns}")
-            print(f"Avg normalized returns: {avg_normalized_returns}")
-            print(f"Avg discounted raw returns: {avg_discounted_raw_returns}")
-            print(f"Avg discounted normalized returns: {avg_discounted_normalized_returns}")
-            print(f"Avg steps: {avg_steps}")
+            print(f"[eval] episodes={num_episodes} avg_steps={avg_steps:.1f}")
             print(
-                "Goal hit rate: "
-                f"{goal_hit_rate:.2f} | Per-goal: "
-                f"{per_goal_hit_rate.tolist()} | Terminated avg step: "
-                f"{avg_termination_step:.1f}"
+                "[eval] "
+                f"raw={np.round(avg_raw_returns, 4)} "
+                f"disc_raw={np.round(avg_discounted_raw_returns, 4)} "
+                f"nsw={avg_raw_nsw_score:.4f} "
+                f"disc_nsw={avg_discounted_raw_nsw_score:.4f} "
+                f"hit_rate={goal_hit_rate:.2f}"
             )
-            print(f"Avg raw NSW score: {avg_raw_nsw_score}")
-            print(f"Avg normalized NSW score: {avg_normalized_nsw_score}")
-            print(f"Avg discounted raw NSW score: {avg_discounted_raw_nsw_score}")
-            print(f"Avg discounted normalized NSW score: {avg_discounted_normalized_nsw_score}")
-            if trace_enabled and trace_steps:
-                print("[eval trace] first episode (first 30 steps)")
-                for entry in trace_steps:
-                    print(
-                        f"t={entry['t']} state={entry['state']} "
-                        f"action={entry['action']} next_state={entry['next_state']} "
-                        f"mode={entry['mode']} reward={entry['reward']} "
-                        f"terminated={entry['terminated']} done={entry['done']}"
-                    )
-                setattr(config, "_eval_trace_done", True)
+            print(
+                "[eval] "
+                f"per_goal_hit_rate={np.round(per_goal_hit_rate, 3).tolist()} "
+                f"avg_termination_step={avg_termination_step:.1f}"
+            )
 
     return raw_returns, normalized_returns, metrics
-    if eval_seed is not None:
-        key = jax.random.PRNGKey(int(eval_seed))

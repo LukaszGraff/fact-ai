@@ -9,15 +9,23 @@ Batch = namedtuple('Batch', ['states', 'next_states', 'actions', 'rewards', 'mas
 
 class Buffer():
     def __init__(self,
-                 offline_data
+                 offline_data,
+                 is_discrete: bool = False
                  ):
 
         states = jnp.array(offline_data['states'].astype(np.float32))
-        next_states=jnp.array(offline_data['next_states'].astype(np.float32))
-        init_states=jnp.array(offline_data['init_states'].astype(np.float32))
-        actions= jnp.array(offline_data['actions'].astype(np.float32))
-        rewards= jnp.array(offline_data['rewards'].astype(np.float32))
-        masks= jnp.array(1.0 - offline_data['terminals'].reshape(-1, 1).astype(np.float32))
+        next_states = jnp.array(offline_data['next_states'].astype(np.float32))
+        init_states = jnp.array(offline_data['init_states'].astype(np.float32))
+        actions_np = np.asarray(offline_data['actions'])
+        if actions_np.ndim > 1 and actions_np.shape[-1] == 1:
+            actions_np = actions_np.reshape(-1)
+        actions_is_int = np.issubdtype(actions_np.dtype, np.integer)
+        if is_discrete or actions_is_int:
+            actions = jnp.array(actions_np.astype(np.int32))
+        else:
+            actions = jnp.array(actions_np.astype(np.float32))
+        rewards = jnp.array(offline_data['rewards'].astype(np.float32))
+        masks = jnp.array(1.0 - offline_data['terminals'].reshape(-1, 1).astype(np.float32))
 
         
         self.size=len(offline_data['actions'])

@@ -56,7 +56,7 @@ def _register_with(gym_module):
     gym_module.envs.registration.register(
         id=_FOURROOM_ENV_ID,
         entry_point=_fourroom_class(),
-        max_episode_steps=200,
+        max_episode_steps=500,
     )
 
 

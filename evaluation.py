@@ -34,7 +34,11 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
 
     for iter in range(num_episodes):
         env.seed(iter)
-        state = env.reset()
+        reset_out = env.reset()
+        if isinstance(reset_out, tuple):
+            state = reset_out[0]
+        else:
+            state = reset_out
         done = False
         steps = 0
         raw_rewards_list = []
@@ -54,7 +58,12 @@ def evaluate_policy(config, policy, env, save_dir, num_episodes=3, max_steps=500
                 # For continuous actions, scale and bias
                 action = (select_action(s_t) * config.ACTION_SCALE + config.ACTION_BIAS).astype(np.float32)
             
-            state, _, done, info = env.step(action)
+            step_out = env.step(action)
+            if isinstance(step_out, tuple) and len(step_out) == 5:
+                state, _, terminated, truncated, info = step_out
+                done = terminated or truncated
+            else:
+                state, _, done, info = step_out
             
 
 

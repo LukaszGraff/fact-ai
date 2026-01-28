@@ -1,4 +1,9 @@
 import numpy as np
+
+# Gym expects np.bool8; NumPy 2.0 removed it. Provide compatibility alias.
+if not hasattr(np, "bool8"):
+    np.bool8 = np.bool_
+
 import gym
 import environments  # Register custom environments
 import pickle
@@ -61,7 +66,11 @@ def generate_offline_data(
     trajectories = []
     
     for traj_idx in tqdm(range(num_trajectories), desc="Generating trajectories"):
-        obs = env.reset()
+        reset_out = env.reset()
+        if isinstance(reset_out, tuple):
+            obs = reset_out[0]
+        else:
+            obs = reset_out
         goal_idx = None
         if behavior == 'greedy_mix':
             goal_idx = np.random.choice(len(unwrapped.goals), p=goal_probs)
@@ -86,7 +95,12 @@ def generate_offline_data(
             else:
                 raise ValueError("behavior must be 'random' or 'greedy_mix'")
             
-            next_obs, _, done, info = env.step(action)
+            step_out = env.step(action)
+            if isinstance(step_out, tuple) and len(step_out) == 5:
+                next_obs, _, terminated, truncated, info = step_out
+                done = terminated or truncated
+            else:
+                next_obs, _, done, info = step_out
             reward = info['obj']  # Multi-objective reward vector
             
             trajectory['observations'].append(obs)

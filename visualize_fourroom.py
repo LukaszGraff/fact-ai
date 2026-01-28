@@ -147,7 +147,11 @@ def visualize_episode(
         rng_key: JAX random key for stochastic sampling. Required if use_greedy=False.
         action_sampler: "policy" to use the model policy, "random_uniform" for uniform random actions.
     """
-    state = env.reset()
+    reset_out = env.reset()
+    if isinstance(reset_out, tuple):
+        state = reset_out[0]
+    else:
+        state = reset_out
     trajectory = {
         'states': [],
         'actions': [],
@@ -190,7 +194,12 @@ def visualize_episode(
                 action = float(dist.mean()[0])
         
         # Step environment
-        next_state, _, done, info = env.step(action)
+        step_out = env.step(action)
+        if isinstance(step_out, tuple) and len(step_out) == 5:
+            next_state, _, terminated, truncated, info = step_out
+            done = terminated or truncated
+        else:
+            next_state, _, done, info = step_out
         reward = info['obj']
         
         trajectory['actions'].append(action)

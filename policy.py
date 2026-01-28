@@ -7,7 +7,12 @@ import jax.numpy as jnp
 class MuNetwork(nnx.Module):
     def __init__(self,
                  config):
-        self.mu = nnx.Param(jnp.full((config.reward_dim,), 1.0))
+        fixed_mu = getattr(config, "fixed_mu", None)
+        if fixed_mu is not None:
+            init_value = jnp.asarray(fixed_mu, dtype=jnp.float32)
+        else:
+            init_value = jnp.full((config.reward_dim,), 1.0)
+        self.mu = nnx.Param(init_value)
         
     def __call__(self):
         return self.mu * 1.0
@@ -36,6 +41,22 @@ class MLP(nnx.Module):
     def __call__(self, x):
         return self.layer(x)
     
+class _Categorical:
+    def __init__(self, logits):
+        self.logits = logits
+        self._log_probs = nnx.log_softmax(logits, axis=-1)
+
+    def log_prob(self, actions):
+        actions = actions.astype(jnp.int32)
+        if actions.ndim == 1:
+            actions = actions.reshape(-1, 1)
+        return jnp.take_along_axis(self._log_probs, actions, axis=-1).squeeze(-1)
+
+    @property
+    def probs(self):
+        return jnp.exp(self._log_probs)
+
+
 class DiscretePolicy(nnx.Module):
     """Policy for discrete action spaces that outputs a Categorical distribution."""
     def __init__(self,
@@ -69,17 +90,19 @@ class DiscretePolicy(nnx.Module):
     def __call__(self, inputs):
         x = self.mlp_layer(inputs)
         logits = self.logits_layer(x) / self.temperature
-        # Return a Categorical distribution (from tensorflow_probability)
-        return tfd.Categorical(logits=logits)
+        return _Categorical(logits=logits)
     
     def get_logits(self, inputs):
         """Return raw logits for debugging or other purposes."""
         x = self.mlp_layer(inputs)
         return self.logits_layer(x) / self.temperature
 
-import tensorflow_probability.substrates.jax as tfp
-tfd = tfp.distributions
-tfb = tfp.bijectors
+def _get_tfp():
+    try:
+        import tensorflow_probability.substrates.jax as tfp
+    except Exception as exc:
+        raise ImportError("tensorflow_probability is required for GaussianPolicy") from exc
+    return tfp.distributions, tfp.bijectors
 
 LOG_STD_MIN = -5.0
 LOG_STD_MAX = 2.0
@@ -111,6 +134,7 @@ class GaussianPolicy(nnx.Module):
         self.action_dim = action_dim
 
     def __call__(self, inputs):
+        tfd, tfb = _get_tfp()
         x = self.mlp_layer(inputs)
         
         means = self.mean_layer(x)
@@ -157,6 +181,7 @@ class MNDPolicy(nnx.Module):
         self.action_dim = action_dim
     
     def __call__(self, observations):
+        tfd, tfb = _get_tfp()
         x = self.mlp_layer(observations)
         
         means = self.mean_layer(x).reshape(-1, self.n_mixture, self.action_dim)

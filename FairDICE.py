@@ -66,7 +66,7 @@ def init_train_state(config) -> TrainState:
                 optax.cosine_decay_schedule(-config.policy_lr, config.total_train_steps)
             )
         )
-    policy_optim = nnx.Optimizer(policy, policy_tx)
+    policy_optim = nnx.Optimizer(policy, policy_tx, wrt=nnx.Param)
     (policy_gd, policy_state) = nnx.split((policy, policy_optim))
 
     nu = Critic(
@@ -75,11 +75,11 @@ def init_train_state(config) -> TrainState:
         layer_norm=config.layer_norm,
         rngs=rngs
     )
-    nu_optim = nnx.Optimizer(nu, optax.adam(learning_rate=config.nu_lr))
+    nu_optim = nnx.Optimizer(nu, optax.adam(learning_rate=config.nu_lr), wrt=nnx.Param)
     (nu_gd, nu_state) = nnx.split((nu, nu_optim))
     
     mu = MuNetwork(config)
-    mu_optim = nnx.Optimizer(mu, optax.adam(learning_rate=config.mu_lr))
+    mu_optim = nnx.Optimizer(mu, optax.adam(learning_rate=config.mu_lr), wrt=nnx.Param)
     (mu_gd, mu_state) = nnx.split((mu, mu_optim))
     
     nu_target = nu_state.filter(nnx.Param)
@@ -98,6 +98,7 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
     step = train_state.step
     gamma = config.gamma
     beta = config.beta
+    fixed_mu = getattr(config, "fixed_mu", None)
     rewards = batch.rewards 
     states = batch.states
     next_states = batch.next_states
@@ -144,12 +145,50 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
         nu_loss = loss_1 + loss_2 + loss_3 + grad_penalty
         return nu_loss, (w, e, mu, grad_penalty)
 
-    (nu_loss, (w, e, mu, grad_penalty)),  (nu_grads, mu_grads) = nnx.value_and_grad(nu_loss_fn, argnums = (0, 1), has_aux=True)(nu_network, mu_network)
-    nu_optim.update(nu_grads)
-    mu_optim.update(mu_grads)
-    
-    nu_state_ = nnx.state((nu_network, nu_optim))
-    mu_state_ = nnx.state((mu_network, mu_optim))
+    if fixed_mu is None:
+        (nu_loss, (w, e, mu, grad_penalty)), (nu_grads, mu_grads) = nnx.value_and_grad(
+            nu_loss_fn, argnums=(0, 1), has_aux=True
+        )(nu_network, mu_network)
+        nu_optim.update(nu_network, nu_grads)
+        mu_optim.update(mu_network, mu_grads)
+        nu_state_ = nnx.state((nu_network, nu_optim))
+        mu_state_ = nnx.state((mu_network, mu_optim))
+    else:
+        fixed_mu = jnp.asarray(fixed_mu, dtype=jnp.float32)
+
+        def nu_loss_fn_fixed(nu_network):
+            nu = nu_network(states)
+            next_nu = nu_network(next_states)
+            init_nu = nu_network(init_states)
+            mu = fixed_mu
+            k = 1.0 / (mu + 1e-8)
+            weighted_rewards = alpha_scalarization(rewards, config.alpha)
+            e = (weighted_rewards + gamma * mask * next_nu - nu)
+            w = jax.nn.relu(f_derivative_inverse(e / beta, f_divergence))
+            loss_1 = (1 - gamma) * jnp.mean(init_nu)
+            loss_2 = jnp.mean(w * e - beta * f(w, f_divergence))
+            loss_3 = jnp.sum(jnp.log(k) - mu * k)
+
+            def nu_scalar(x):
+                return jnp.squeeze(nu_network(x), -1)
+            interpolated_observations = init_states * eps + next_states * (1 - eps)
+            grad_fn = jax.vmap(jax.grad(nu_scalar), in_axes=0)
+            nu_grad = grad_fn(interpolated_observations)
+            grad_norm = jnp.linalg.norm(nu_grad, axis=1)
+            grad_penalty = (
+                config.gradient_penalty_coeff *
+                jnp.mean(jax.nn.relu(grad_norm - 5.) ** 2)
+            )
+
+            nu_loss = loss_1 + loss_2 + loss_3 + grad_penalty
+            return nu_loss, (w, e, mu, grad_penalty)
+
+        (nu_loss, (w, e, mu, grad_penalty)), nu_grads = nnx.value_and_grad(
+            nu_loss_fn_fixed, has_aux=True
+        )(nu_network)
+        nu_optim.update(nu_network, nu_grads)
+        nu_state_ = nnx.state((nu_network, nu_optim))
+        mu_state_ = train_state.mu_state.state
     
     def policy_loss_fn(policy):
         dist = policy(states)
@@ -179,7 +218,7 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
         return policy_loss, log_probs
         
     (policy_loss, log_probs), policy_grads= nnx.value_and_grad(policy_loss_fn, has_aux=True)(policy)
-    policy_optim.update(policy_grads)
+    policy_optim.update(policy, policy_grads)
     policy_state_ = nnx.state((policy, policy_optim))
 
     train_state = train_state._replace(
@@ -196,7 +235,7 @@ def train_step(config, train_state: TrainState, batch, key: jax.random.PRNGKey):
     return train_state, {
         "policy_loss": policy_loss,
         "nu_loss": nu_loss,
-        "mu": mu,
+        "mu": mu if fixed_mu is None else jnp.asarray(fixed_mu, dtype=jnp.float32),
         "grad_penalty": grad_penalty,
     }
     

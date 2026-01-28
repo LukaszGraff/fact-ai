@@ -79,9 +79,11 @@ class FourRoomEnv(gym.Env):
                 break
 
         self.step_count += 1  
-        obs = np.array(self.agent_pos)
+        obs = np.array(self.agent_pos, dtype=np.int32)
         
-        return obs, 0., done, {'obj': reward}
+        terminated = done
+        truncated = False
+        return obs, 0.0, terminated, truncated, {'obj': reward}
     
 
     def _get_next_pos(self, pos, action):
@@ -101,7 +103,7 @@ class FourRoomEnv(gym.Env):
         self.agent_pos = (2, 2)
         self.step_count = 0
         self.visited = set()
-        return np.array(self.agent_pos)
+        return np.array(self.agent_pos, dtype=np.int32), {}
 
     def render(self, mode='human'):
         """Visualize the environment using matplotlib."""

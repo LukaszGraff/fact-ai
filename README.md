@@ -1,4 +1,12 @@
-# FairDICE: Fairness-Driven Offline Multi-Objective Reinforcement Learning
+# Reproducing FairDICE: Fairness-Driven Offline Multi-Objective Reinforcement Learning
+
+This repository contains the codebase of Group 2 for the course 5204FACT6Y - Fairness, Accountability, Confidentiality and Transparency in AI. The directory has the following structure:
+
+\begin{itemize}
+\item First, we describe the setup of the environment with the necessary libraries for running our scripts.
+\item Second, 
+\end{itemize}
+
 
 ## Setup
   Use the offered Dockerfile for the setup and create conda environment using yml file.

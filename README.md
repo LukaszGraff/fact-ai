@@ -33,7 +33,16 @@ For the discrete case, only the Random-MOMDP dataset needs to be downloaded. We 
 
 ## Claim 3
 
-This directory contains the necessary scripts for running the experiment for the valiadation of Claim 3 regarding the change in model behaviour with respect to different $alpha$ - $beta$ configurations.
+This directory contains the necessary scripts for running the experiment for the valiadation of Claim 3 regarding the change in model behaviour with respect to different $alpha$ - $beta$ configurations. The directory contains the following scripts:
+
+- environments\random_momdp.py: describes the Random-MOMDP environment with a fixed horizon for each episode.
+- environments\random_momdp_terminate.py: describes the Random-MOMDP environment with each episode terminating upon reaching a goal state.
+- main_experiment_3.py: the main file used for running the experiment veifying Claim 3. Appropriate flags are included to allow for command line running of the framework.
+- evaluate_momdp.py: the discrete modification of the original evaluate.py for the MOMDP environment
+- plotting_momdp.py & plotting_momdp2.py: two separate files used for the plotting of the results as presented in our paper. There exists two separate files, since the second version was specifically created to be run on a set of results from a parallelized jobs.
+- FairDICE_momdp.py & FairDICE_momdp2.py: these files contain the FairDICE framework accomodated to the discrete case. They additionally include the alpha parameter as a hyperparameter, required for the experiment. For the results of the paper, the second version was used.
+
+The hyperparameters used for the training are set as the default parameters. For running the experiment, running main_experiment_3.py with the correct data directory suffices, then the resulting .csv files can be used for the plotting.
 
 ## Claim 4
 

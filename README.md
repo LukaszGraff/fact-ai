@@ -33,7 +33,7 @@ For the discrete case, only the Random-MOMDP dataset needs to be downloaded. We 
 
 ## Claim 3
 
-This directory contains the necessary scripts for running the experiment for the valiadation of Claim 3 regarding the change in model behaviour with respect to different $alpha$-$beta$ configurations.
+This directory contains the necessary scripts for running the experiment for the valiadation of Claim 3 regarding the change in model behaviour with respect to different $alpha$ - $beta$ configurations.
 
 ## Claim 4
 

@@ -44,8 +44,8 @@ for ENV in MO-Hopper-v2 MO-Walker2d-v2 MO-Swimmer-v2 MO-HalfCheetah-v2 MO-Ant-v2
                     --batch_size 256 \
                     --hidden_dim $hidden_dim \
                     --num_layers $num_layers \
-                    --total_train_steps 10 \
-                    --log_interval 1 \
+                    --total_train_steps 100000 \
+                    --log_interval 1000 \
                     --normalize_reward True
             done
         done

@@ -24,7 +24,7 @@ ENVS=(
 DATASETS=(expert_uniform amateur_uniform)
 SEEDS=(1 2 3 4 5)
 
-STEP=10
+STEP=100000
 ITER=1
 
 for MODEL in "${MODELS[@]}"; do

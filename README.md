@@ -1,19 +1,33 @@
 # Reproducing FairDICE: Fairness-Driven Offline Multi-Objective Reinforcement Learning
 
-This repository contains the codebase of Group 2 for the course 5204FACT6Y - Fairness, Accountability, Confidentiality and Transparency in AI. The directory has the following structure:
+This repository contains the codebase of Group 2 for the course 5204FACT6Y - Fairness, Accountability, Confidentiality and Transparency in AI. It is the reproduction of the following paper: https://openreview.net/forum?id=2jQJ7aNdT1. This README has the following structure:
 
 - First, we describe the setup of the environment with the necessary libraries for running our scripts.
 - Second, we provide the links for downloading the datasets used for training and evaluating the models both on the continuous and discrete domains.
 - Third, we provide the source-code oif each experiment verifying the specific claims addressed in our paper in a specific folder (e.g. Claim 3). 
 
 
+## Acknowledgements / Attribution
+
+This repository is uses the following projects:
+
+- **FairDICE**: https://github.com/ku-dmlab/FairDICE  
+- **PEDA**: https://github.com/baitingzbt/PEDA  
+
+We gratefully acknowledge the authors and contributors of these repositories for their work, ideas, and implementations that made this project possible.
+
+
 ## Setup
-  Use the offered Dockerfile for the setup and create conda environment using yml file.
+This project requires installing two separate environments. To create the FairDICE environment use:
+
   ```
-  cd FairDICE
   conda env create -f environment.yml
-  conda activate fairdice
   ```
+
+To create the PEDA environment use:
+ ```
+  sh install_peda.sh
+```
 
 ## Data Download
 For the continuous case, the D4MORL dataset, a benchmark suite designed for offline multi-objective reinforcement learning (MORL) was used. 
@@ -29,7 +43,9 @@ For the discrete case, only the Random-MOMDP dataset needs to be downloaded. We 
 
 ## Claim 1
 
+
 ## Claim 2
+See the readme files for [Figure 3](Claim2/fig3/README.md), [Figure 7](Claim2/fig7/README.md) and [Extension](Claim2/extension/README.md).
 
 ## Claim 3
 
@@ -45,7 +61,7 @@ This directory contains the necessary scripts for running the experiment for the
 The hyperparameters used for the training are set as the default parameters. For running the experiment, running main_experiment_3.py with the correct data directory suffices, then the resulting .csv files can be used for the plotting.
 
 ## Claim 4
-
+See the [Claim 4 readme](claim4/README.md).
 
 
 ## License

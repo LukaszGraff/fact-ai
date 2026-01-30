@@ -1,14 +1,4 @@
 #!/bin/bash
-#SBATCH --partition=gpu_a100
-#SBATCH --gpus=1
-#SBATCH --job-name=train_all
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
-#SBATCH --time=60:00:00
-#SBATCH --output=logs/slurm/train_all_%A.out
-
-set -eo pipefail
 
 module purge
 module load 2025
@@ -81,7 +71,7 @@ for MODEL in "${MODELS[@]}"; do
           EXTRA_EVAL_ARGS+=(--eval_pref_mode grid --granularity "${GRAN}" --pref_seed "${PREF_SEED}")
         fi
 
-        srun python run_with_cc.py \
+        python run_with_cc.py \
           --cc project_name="PEDA" \
           --cc experiment_id="MODEL=${MODEL}|ENV=${ENV}|DATASET=${DATASET}" \
           --cc measure_power_secs=30 \

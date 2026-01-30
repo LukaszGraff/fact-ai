@@ -43,6 +43,101 @@ For the discrete case, only the Random-MOMDP dataset needs to be downloaded. We 
 
 ## Claim 1
 
+From the repo root, start by switching into the experiment directory:
+
+```bash
+cd claim1
+```
+
+### 1) Run FairDICE (all envs × datasets × betas × seeds)
+
+This script launches FairDICE training/evaluation runs across multiple MuJoCo multi-objective environments, both `expert` and `amateur` datasets, several `beta` values, and multiple seeds. 
+
+```bash
+bash FairDICE/run_all.sh
+```
+
+### 2) Visualize FairDICE results (NSW vs. beta)
+
+`FairDICE/visualize.py` searches your run directory recursively for folders that contain an `eval/` subdir with `normalized_returns_step_*.npy`, then aggregates Nash Social Welfare (NSW) across seeds and plots **Amateur vs Expert** for each beta. 
+
+Minimal example:
+
+```bash
+python FairDICE/visualize.py \
+  --root FairDICE/results \
+  --out fairdice_results.png
+```
+
+Helpful options:
+
+* `--dataset_suffix` (e.g., `uniform`) to require tags like `amateur_uniform` / `expert_uniform` in folder names 
+* `--envs ...` to restrict to specific env names
+* `--ncols` to control subplot layout 
+
+### 3) Aggregate FairDICE outputs into `.npz` for baseline comparison
+
+This prepares FairDICE results into a standardized `.npz` format (one per env/dataset) that the baseline plotting script can load later. By default it writes into `PEDA/fairdice_npz/`. 
+
+```bash
+bash PEDA/prepare_fd.sh
+```
+
+Notes:
+
+* It expects FairDICE results under `../FairDICE/results` relative to `PEDA/`. 
+* It currently passes `--beta_filter "beta1.0"`; adjust that if you want to aggregate a different beta set. 
+
+### 4) Train + evaluate all baselines (BC / MODT / MORvS)
+
+This script runs baseline training/eval across:
+
+* models: `bc`, `dt`, `rvs`
+* envs: Hopper/Swimmer/HalfCheetah/Walker2d/Ant (v2) + Hopper-v3
+* datasets: `expert_uniform`, `amateur_uniform`
+* seeds: 1–5 
+
+```bash
+bash PEDA/train_all.sh
+```
+
+### 5) Make comparison plots (baselines + FairDICE)
+
+`PEDA/make_plots.py` loads baseline rollout logs under `--runs_root` (expects subdirs like `dt/`, `bc/`, `rvs/`) and optionally overlays FairDICE from `--fairdice_dir` (your `.npz` folder from step 3). 
+
+Common usage patterns:
+
+**Metric panels + Pareto panels (2-objective envs):**
+
+```bash
+python PEDA/make_plots.py \
+  --runs_root PEDA/experiment_runs/uniform \
+  --fairdice_dir PEDA/fairdice_npz \
+  --out_dir plots \
+  --panel
+```
+
+**3-objective Hopper-v3 figure:**
+
+```bash
+python PEDA/make_plots.py \
+  --runs_root PEDA/experiment_runs/uniform \
+  --fairdice_dir PEDA/fairdice_npz \
+  --out_dir plots \
+  --do_hopper_v3
+```
+
+**Smaller “metrics subset” grid:**
+
+```bash
+python PEDA/make_plots.py \
+  --runs_root PEDA/experiment_runs/uniform \
+  --fairdice_dir PEDA/fairdice_npz \
+  --out_dir plots \
+  --metrics_subset
+```
+
+(See the CLI flags in `make_plots.py` for the full set.) 
 
 ## Claim 2
 See the readme files for [Figure 3](Claim2/fig3/README.md), [Figure 7](Claim2/fig7/README.md) and [Extension](Claim2/extension/README.md).

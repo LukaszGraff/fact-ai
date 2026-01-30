@@ -1,0 +1,7 @@
+/experiment_runs*
+/logs
+/fairdice_npz
+/plots
+__pycache__/
+*.py[cod]
+*$py.class

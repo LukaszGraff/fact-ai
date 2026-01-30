@@ -23,6 +23,7 @@ dependencies:
     - charset-normalizer
     - click
     - cloudpickle
+    - codecarbon
     - configargparse
     - cycler
     - cython==0.29.32

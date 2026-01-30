@@ -4,7 +4,7 @@
 #SBATCH --job-name=four_room_job
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --time=00:10:00
+#SBATCH --time=00:30:00
 #SBATCH --output=logs/slurm/output_%A.out
 
 #SBATCH --ear=on
@@ -27,6 +27,8 @@ export D4RL_SUPPRESS_IMPORT_ERROR=1
 export LD_LIBRARY_PATH="/usr/lib/nvidia:/usr/lib64/nvidia:$MUJOCO_PY_MUJOCO_PATH/bin:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export JAX_PLATFORMS=cpu
 
-#python visualize_fourroom.py --per_state_cap 1 --max_steps 100 --num_episodes 100 --stochastic
-
-python utility-scripts/evaluate_sweep_welfare.py --sweep_dir /home/scur0132/claim4/fact-ai/results/sweep_20260125_185613
+#python visualize_fourroom.py --per_state_cap 1 --max_steps 200 --num_episodes 400 --stochastic --model_path /home/scur0132/claim4/fact-ai/results/20260126_213638_FairDICE_MO-NineRoom-v2_amateur_uniform_CHI_beta0.001_seed1984/model --env_name MO-NineRoom-v2
+#python utility-scripts/evaluate_sweep_welfare.py --sweep_dir /home/scur0132/claim4/fact-ai/results/goalmix_sweep_20260129_170717 --episodes 100 --group_by mix
+#python utility-scripts/merge_goalmix_nsw.py \
+  #--csv ./results/goalmix_sweep_20260129_170717/reeval_welfare_episodes_100.csv
+python utility-scripts/train_fairdice_single_with_cc.py

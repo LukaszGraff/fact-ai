@@ -38,7 +38,8 @@ export D4RL_SUPPRESS_IMPORT_ERROR=1
 export LD_LIBRARY_PATH="/usr/lib/nvidia:/usr/lib64/nvidia:$MUJOCO_PY_MUJOCO_PATH/bin:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 export JAX_PLATFORMS=cpu
 
-python evaluate_sweep_welfare.py \
+python utility-scripts/evaluate_sweep_welfare.py \
   --sweep_dir "./results/$SWEEP_ID" \
   --episodes "$EPISODES" \
-  --max_steps "$MAX_STEPS"
+  --max_steps "$MAX_STEPS" \
+  --group_by "mix"

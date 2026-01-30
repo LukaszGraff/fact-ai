@@ -1,11 +1,10 @@
 #!/bin/bash
 
-#SBATCH --partition=gpu_a100
-#SBATCH --gpus=1
+#SBATCH --partition=rome
 #SBATCH --job-name=four_room_job
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --time=00:10:00
+#SBATCH --time=01:00:00
 #SBATCH --output=logs/slurm/output_%A.out
 
 #SBATCH --ear=on
@@ -26,11 +25,12 @@ export MUJOCO_PY_MUJOCO_PATH="$HOME/.mujoco/mujoco210"
 export MUJOCO_GL=egl
 export D4RL_SUPPRESS_IMPORT_ERROR=1
 export LD_LIBRARY_PATH="/usr/lib/nvidia:/usr/lib64/nvidia:$MUJOCO_PY_MUJOCO_PATH/bin:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+export JAX_PLATFORMS=cpu
 
-# python generate_fourroom_data.py \
+# python utility-scripts/generate_fourroom_data.py \
 #     --env_name MO-FourRoom-v2 \
 #     --num_trajectories 300 \
-#     --max_steps 400 \
+#     --max_steps 200 \
 
 python main_fourroom.py \
     --learner FairDICE \
@@ -41,7 +41,7 @@ python main_fourroom.py \
     --seed 1984 \
     --preference_dist uniform \
     --eval_episodes 10 \
-    --batch_size 256 \
+    --batch_size 64 \
     --hidden_dim 256 \
     --num_layers 2 \
     --total_train_steps 100000 \
@@ -53,3 +53,5 @@ python main_fourroom.py \
     --mu_lr 3e-4 \
     --gamma 0.99 \
     --save_model_mode last
+
+python visualize_fourroom.py --per_state_cap 1 --max_steps 200 --num_episodes 100 --stochastic

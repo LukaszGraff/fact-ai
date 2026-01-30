@@ -19,7 +19,7 @@ import environments
 from evaluation import evaluate_policy
 
 
-RUN_RE = re.compile(r"^seed_(\d+)_beta_([^_]+)_h(\d+)_bs(\d+)$")
+RUN_RE = re.compile(r"^(?:.*_)?seed_(\d+)_beta_([^_]+)_h(\d+)_bs(\d+)$")
 
 
 def _load_config(run_dir: str) -> SimpleNamespace:
@@ -66,7 +66,7 @@ def main() -> None:
     )
     parser.add_argument("--sweep_dir", required=True, help="Sweep directory with seed_* runs.")
     parser.add_argument("--episodes", type=int, default=30, help="Episodes per model.")
-    parser.add_argument("--max_steps", type=int, default=400, help="Max steps per episode.")
+    parser.add_argument("--max_steps", type=int, default=200, help="Max steps per episode.")
     parser.add_argument(
         "--save_step",
         type=int,
@@ -78,6 +78,12 @@ def main() -> None:
         "--output_csv",
         default="",
         help="Optional CSV output path (defaults to sweep dir).",
+    )
+    parser.add_argument(
+        "--group_by",
+        choices=["hparams", "mix", "mix+hparams"],
+        default="hparams",
+        help="How to group runs before aggregation.",
     )
     args = parser.parse_args()
 
@@ -94,6 +100,9 @@ def main() -> None:
             continue
 
         seed, beta, hdim, bsize = m.groups()
+        mix_tag = None
+        if "_seed_" in entry:
+            mix_tag = entry.split("_seed_")[0]
         model_dir = os.path.join(run_dir, "model")
         if not os.path.isdir(model_dir):
             missing.append(entry)
@@ -127,7 +136,12 @@ def main() -> None:
         usw = _usw_score(raw_returns)
         jain = _jain_index(raw_returns)
 
-        key = (beta, hdim, bsize)
+        if args.group_by == "hparams":
+            key = (beta, hdim, bsize)
+        elif args.group_by == "mix":
+            key = (mix_tag,)
+        else:
+            key = (mix_tag, beta, hdim, bsize)
         per_setting[key].append(
             {
                 "seed": int(seed),
@@ -138,46 +152,61 @@ def main() -> None:
         )
 
     rows = []
-    for (beta, hdim, bsize), vals in sorted(
-        per_setting.items(), key=lambda x: (float(x[0][0]), int(x[0][1]), int(x[0][2]))
-    ):
+    def _sort_key(item):
+        key = item[0]
+        if args.group_by == "hparams":
+            return (float(key[0]), int(key[1]), int(key[2]))
+        if args.group_by == "mix":
+            return (str(key[0]),)
+        return (str(key[0]), float(key[1]), int(key[2]), int(key[3]))
+
+    for key, vals in sorted(per_setting.items(), key=_sort_key):
+        if args.group_by == "hparams":
+            beta, hdim, bsize = key
+        elif args.group_by == "mix":
+            (mix_tag,) = key
+            beta = hdim = bsize = ""
+        else:
+            mix_tag, beta, hdim, bsize = key
+
         nsw_vals = [v["nsw"] for v in vals]
         usw_vals = [v["usw"] for v in vals]
         jain_vals = [v["jain"] for v in vals]
-        rows.append(
-            {
-                "beta": beta,
-                "hidden_dim": hdim,
-                "batch_size": bsize,
-                "num_seeds": len(vals),
-                "nsw_mean": float(np.mean(nsw_vals)),
-                "nsw_std": float(np.std(nsw_vals)),
-                "usw_mean": float(np.mean(usw_vals)),
-                "usw_std": float(np.std(usw_vals)),
-                "jain_mean": float(np.mean(jain_vals)),
-                "jain_std": float(np.std(jain_vals)),
-            }
-        )
+        row = {
+            "beta": beta,
+            "hidden_dim": hdim,
+            "batch_size": bsize,
+            "num_seeds": len(vals),
+            "nsw_mean": float(np.mean(nsw_vals)),
+            "nsw_std": float(np.std(nsw_vals)),
+            "usw_mean": float(np.mean(usw_vals)),
+            "usw_std": float(np.std(usw_vals)),
+            "jain_mean": float(np.mean(jain_vals)),
+            "jain_std": float(np.std(jain_vals)),
+        }
+        if args.group_by in ("mix", "mix+hparams"):
+            row["mix_tag"] = mix_tag
+        rows.append(row)
 
     output_csv = args.output_csv or os.path.join(
         sweep_dir, f"reeval_welfare_episodes_{args.episodes}.csv"
     )
     with open(output_csv, "w", newline="") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "beta",
-                "hidden_dim",
-                "batch_size",
-                "num_seeds",
-                "nsw_mean",
-                "nsw_std",
-                "usw_mean",
-                "usw_std",
-                "jain_mean",
-                "jain_std",
-            ],
-        )
+        fieldnames = [
+            "beta",
+            "hidden_dim",
+            "batch_size",
+            "num_seeds",
+            "nsw_mean",
+            "nsw_std",
+            "usw_mean",
+            "usw_std",
+            "jain_mean",
+            "jain_std",
+        ]
+        if args.group_by in ("mix", "mix+hparams"):
+            fieldnames = ["mix_tag"] + fieldnames
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 

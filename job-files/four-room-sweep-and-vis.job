@@ -97,14 +97,14 @@ fi
 GENERATE_DATA=${GENERATE_DATA:-0}
 NUM_TRAJ=${NUM_TRAJ:-300}
 DATA_MAX_STEPS=${DATA_MAX_STEPS:-400}
-BEHAVIOR=${BEHAVIOR:-greedy_mix}
+BEHAVIOR=${BEHAVIOR:-optimal_mix}
 GOAL_MIX=${GOAL_MIX:-0.6,0.2,0.2}
-EPS_GREEDY=${EPS_GREEDY:-0.3}
+EPS_OPTIMAL=${EPS_OPTIMAL:-0.3}
 
 # Aggregate visualization
 EPISODES_PER_MODEL=${EPISODES_PER_MODEL:-100}
 AGG_MAX_STEPS=${AGG_MAX_STEPS:-100}
-AGG_STOCHASTIC=${AGG_STOCHASTIC:-1}   # 1 to sample actions, 0 for greedy
+AGG_STOCHASTIC=${AGG_STOCHASTIC:-1}   # 1 to sample actions, 0 for argmax
 PER_SETTING_AGGREGATE=${PER_SETTING_AGGREGATE:-1}  # 1 to render per-hparam setting
 
 # Parallelism for the array

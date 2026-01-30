@@ -1,0 +1,242 @@
+#!/bin/bash
+
+#SBATCH --partition=rome
+#SBATCH --job-name=fourroom_goalmix_sweep
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=04:00:00
+#SBATCH --output=logs/slurm/%x_%j.out
+
+#SBATCH --ear=on
+#SBATCH --ear-policy=monitoring
+#SBATCH --ear-verbose=1
+
+set -euo pipefail
+
+# ------------------------------------------------------------
+# Sweep goal_mix -> train FairDICE -> (optional) aggregate.
+#
+# Usage:
+#   sbatch four-room-goalmix-sweep.job
+#
+# Modes:
+#  1) launcher (default): generates datasets for each goal_mix,
+#     submits training array, and then a visualization job.
+#  2) train (MODE=train): trains one seed for one goal_mix.
+#  3) aggregate (MODE=aggregate): aggregates policy heatmaps.
+# ------------------------------------------------------------
+
+MODE=${MODE:-launcher}
+SWEEP_ID=${SWEEP_ID:-}
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+unset CONDA_PREFIX CONDA_SHLVL CONDA_DEFAULT_ENV
+source "$EBROOTANACONDA3/etc/profile.d/conda.sh"
+conda activate fairdice
+
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
+
+export MUJOCO_PY_MUJOCO_PATH="$HOME/.mujoco/mujoco210"
+export MUJOCO_GL=egl
+export D4RL_SUPPRESS_IMPORT_ERROR=1
+export LD_LIBRARY_PATH="/usr/lib/nvidia:/usr/lib64/nvidia:$MUJOCO_PY_MUJOCO_PATH/bin:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+export JAX_PLATFORMS=cpu
+
+# --------- Fixed training config ---------
+ENV_NAME="MO-FourRoom-v2"
+QUALITY="amateur"
+DIVERGENCE="CHI"
+BETA="0.001"
+GAMMA="0.99"
+BATCH_SIZE="64"
+HIDDEN_DIM="256"
+NUM_LAYERS="2"
+TOTAL_TRAIN_STEPS="100000"
+LOG_INTERVAL="1000"
+EVAL_EPISODES="10"
+MAX_SEQ_LEN="200"
+POLICY_LR="3e-4"
+NU_LR="3e-4"
+MU_LR="3e-4"
+NORMALIZE_REWARD="False"
+SAVE_MODEL_MODE="last"
+
+# --------- Goal-mix sweep config ---------
+# Override GOAL_MIXES_STR to customize the sweep.
+# Example:
+#   GOAL_MIXES_STR="0.1,0.1,0.8 0.2,0.2,0.6 0.33,0.33,0.34 0.6,0.2,0.2"
+SEED_COUNT=10
+GOAL_MIXES_STR=${GOAL_MIXES_STR:-"0.1,0.1,0.8 0.1,0.8,0.1 0.8,0.1,0.1 0.2,0.2,0.6 0.2,0.6,0.2 0.6,0.2,0.2 0.25,0.25,0.5 0.25,0.5,0.25 0.5,0.25,0.25 0.33,0.33,0.34 0.15,0.15,0.7 0.15,0.7,0.15 0.7,0.15,0.15 0.4,0.3,0.3 0.3,0.4,0.3 0.3,0.3,0.4"}
+
+read -r -a GOAL_MIXES <<< "$GOAL_MIXES_STR"
+GOAL_TAGS=()
+for mix in "${GOAL_MIXES[@]}"; do
+  tag=${mix//./p}
+  tag=${tag//,/_}
+  GOAL_TAGS+=("mix_${tag}")
+done
+
+# Data generation
+GENERATE_DATA=${GENERATE_DATA:-1}
+NUM_TRAJ=${NUM_TRAJ:-300}
+DATA_MAX_STEPS=${DATA_MAX_STEPS:-200}
+BEHAVIOR=${BEHAVIOR:-mixed_optimal}
+EPS_OPTIMAL=${EPS_OPTIMAL:-0.3}
+RANDOM_FRAC=${RANDOM_FRAC:-0.5}
+
+# Aggregate visualization
+EPISODES_PER_MODEL=${EPISODES_PER_MODEL:-50}
+AGG_MAX_STEPS=${AGG_MAX_STEPS:-100}
+AGG_STOCHASTIC=${AGG_STOCHASTIC:-1}
+AGG_ALL=${AGG_ALL:-0}  # 1 to render one aggregate across all models
+
+# Parallelism for the array
+ARRAY_PARALLELISM=${ARRAY_PARALLELISM:-500}
+
+if [[ "$MODE" == "launcher" ]]; then
+  if [[ -z "$SWEEP_ID" ]]; then
+    SWEEP_ID="goalmix_sweep_$(date +%Y%m%d_%H%M%S)"
+  fi
+
+  echo "Launching goal-mix sweep: $SWEEP_ID"
+
+  if [[ "$GENERATE_DATA" == "1" ]]; then
+    echo "Generating offline data for each goal_mix..."
+    for i in "${!GOAL_MIXES[@]}"; do
+      mix="${GOAL_MIXES[$i]}"
+      tag="${GOAL_TAGS[$i]}"
+      echo "  mix=$mix -> preference_dist=$tag"
+      python utility-scripts/generate_fourroom_data.py \
+        --env_name "$ENV_NAME" \
+        --num_trajectories "$NUM_TRAJ" \
+        --quality "$QUALITY" \
+        --preference_dist "$tag" \
+        --max_steps "$DATA_MAX_STEPS" \
+        --behavior "$BEHAVIOR" \
+        --goal_mix "$mix" \
+        --epsilon_optimal "$EPS_OPTIMAL" \
+        --random_frac "$RANDOM_FRAC"
+    done
+  fi
+
+  NUM_MIXES=${#GOAL_MIXES[@]}
+  ARRAY_SIZE=$((SEED_COUNT * NUM_MIXES))
+
+  TRAIN_JOB_ID=$(sbatch --parsable \
+    --array=0-$((ARRAY_SIZE-1))%$ARRAY_PARALLELISM \
+    --export=MODE=train,SWEEP_ID="$SWEEP_ID" \
+    job-files/four-room-goalmix-sweep.job)
+
+  echo "Submitted training array job: $TRAIN_JOB_ID"
+
+  VIS_JOB_ID=$(sbatch --parsable \
+    --dependency=afterok:${TRAIN_JOB_ID} \
+    --export=MODE=aggregate,SWEEP_ID="$SWEEP_ID" \
+    job-files/four-room-goalmix-sweep.job)
+
+  echo "Submitted aggregate job: $VIS_JOB_ID (depends on $TRAIN_JOB_ID)"
+  echo "Sweep directory: ./results/$SWEEP_ID"
+  exit 0
+fi
+
+if [[ -z "$SWEEP_ID" ]]; then
+  echo "SWEEP_ID must be set (launcher sets it automatically)." >&2
+  exit 1
+fi
+
+RESULTS_DIR="./results/$SWEEP_ID"
+mkdir -p "$RESULTS_DIR"
+
+if [[ "$MODE" == "train" ]]; then
+  NUM_MIXES=${#GOAL_MIXES[@]}
+
+  TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
+  SEED_INDEX=$((TASK_ID % SEED_COUNT))
+  MIX_INDEX=$((TASK_ID / SEED_COUNT))
+
+  if [[ "$MIX_INDEX" -ge "$NUM_MIXES" ]]; then
+    echo "Task $TASK_ID exceeds mix grid size ($NUM_MIXES) with SEED_COUNT=$SEED_COUNT" >&2
+    exit 1
+  fi
+
+  MIX="${GOAL_MIXES[$MIX_INDEX]}"
+  PREF_DIST="${GOAL_TAGS[$MIX_INDEX]}"
+  SEED="$SEED_INDEX"
+  RUN_NAME="mix_${PREF_DIST}_seed_${SEED}_beta_${BETA}_h${HIDDEN_DIM}_bs${BATCH_SIZE}"
+
+  echo "Training mix=$MIX pref_dist=$PREF_DIST seed=$SEED -> $RESULTS_DIR/$RUN_NAME"
+
+  python main_fourroom.py \
+    --mode train \
+    --env_name "$ENV_NAME" \
+    --learner FairDICE \
+    --quality "$QUALITY" \
+    --preference_dist "$PREF_DIST" \
+    --divergence "$DIVERGENCE" \
+    --beta "$BETA" \
+    --gamma "$GAMMA" \
+    --batch_size "$BATCH_SIZE" \
+    --hidden_dim "$HIDDEN_DIM" \
+    --num_layers "$NUM_LAYERS" \
+    --total_train_steps "$TOTAL_TRAIN_STEPS" \
+    --log_interval "$LOG_INTERVAL" \
+    --eval_episodes "$EVAL_EPISODES" \
+    --max_seq_len "$MAX_SEQ_LEN" \
+    --policy_lr "$POLICY_LR" \
+    --nu_lr "$NU_LR" \
+    --mu_lr "$MU_LR" \
+    --normalize_reward "$NORMALIZE_REWARD" \
+    --seed "$SEED" \
+    --save_path "$RESULTS_DIR" \
+    --run_name "$RUN_NAME" \
+    --save_model_mode "$SAVE_MODEL_MODE"
+
+  exit 0
+fi
+
+if [[ "$MODE" == "aggregate" ]]; then
+  echo "Aggregating models from $RESULTS_DIR"
+
+  STOCH_FLAG=""
+  if [[ "$AGG_STOCHASTIC" == "1" ]]; then
+    STOCH_FLAG="--stochastic"
+  fi
+
+  if [[ "$AGG_ALL" == "1" ]]; then
+    python visualize_fourroom.py \
+      --sweep_dir "$RESULTS_DIR" \
+      --env_name "$ENV_NAME" \
+      --episodes_per_model "$EPISODES_PER_MODEL" \
+      --max_steps "$AGG_MAX_STEPS" \
+      $STOCH_FLAG \
+      --output "$RESULTS_DIR/aggregate_policy_heatmap.png"
+  fi
+
+  echo "Aggregating per goal-mix..."
+  for tag in "${GOAL_TAGS[@]}"; do
+    tmp_dir="$RESULTS_DIR/aggregate_tmp/$tag"
+    mkdir -p "$tmp_dir"
+    while IFS= read -r run_dir; do
+      run_base=$(basename "$run_dir")
+      run_dir_abs=$(readlink -f "$run_dir")
+      ln -sfn "$run_dir_abs" "$tmp_dir/$run_base"
+    done < <(find "$RESULTS_DIR" -maxdepth 1 -type d -name "mix_${tag}_seed_*" | sort)
+
+    python visualize_fourroom.py \
+      --sweep_dir "$tmp_dir" \
+      --env_name "$ENV_NAME" \
+      --episodes_per_model "$EPISODES_PER_MODEL" \
+      --max_steps "$AGG_MAX_STEPS" \
+      $STOCH_FLAG \
+      --output "$RESULTS_DIR/aggregate_${tag}.png"
+  done
+
+  echo "Done. Output: $RESULTS_DIR/aggregate_*.png"
+  exit 0
+fi
+
+echo "Unknown MODE=$MODE" >&2
+exit 1

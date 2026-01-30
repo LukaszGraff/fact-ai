@@ -1,6 +1,17 @@
 import argparse
 import json
+
+import numpy as np
+import gym
+import jax
+
 import os
+import sys
+# for relative imports
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+import environments  # register env
+from FairDICE import load_model, get_model
+from utils import normalization
 
 
 def _parse_args():
@@ -27,13 +38,7 @@ if args.device == "cpu":
 else:
     os.environ.pop("JAX_PLATFORMS", None)
 
-import numpy as np
-import gym
-import jax
 
-import environments  # register env
-from FairDICE import load_model, get_model
-from utils import normalization
 
 
 def main() -> None:

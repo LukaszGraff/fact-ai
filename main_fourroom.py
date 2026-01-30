@@ -42,7 +42,12 @@ def main():
     parser.add_argument("--mu_lr", type=float, default=3e-4, help="Mu learning rate")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size for training")
     parser.add_argument("--quality", type=str, choices=["expert", "amateur"], default="expert", help="Dataset quality")
-    parser.add_argument("--preference_dist", type=str, choices=["uniform", "wide", "narrow"], default="uniform", help="Preference distribution")
+    parser.add_argument(
+        "--preference_dist",
+        type=str,
+        default="uniform",
+        help="Dataset tag used in the offline data filename (e.g., uniform, wide, narrow, or custom).",
+    )
     parser.add_argument("--max_seq_len", type=int, default=200, help="Max sequence length in trajectories")
     parser.add_argument("--normalize_reward", type=bool, default=False, help="Whether to normalize reward")
     parser.add_argument("--env_name", type=str, default="MO-FourRoom-v2", help="Environment name")
@@ -276,7 +281,19 @@ def main():
     if config.save_path:
         # Save config as JSON for later use
         import json
-        config_dict = {k: v.tolist() if isinstance(v, np.ndarray) else v for k, v in vars(config).items()}
+
+        def _json_safe(value):
+            if isinstance(value, np.ndarray):
+                return value.tolist()
+            if isinstance(value, (np.integer,)):
+                return int(value)
+            if isinstance(value, (np.floating,)):
+                return float(value)
+            if isinstance(value, (np.bool_,)):
+                return bool(value)
+            return value
+
+        config_dict = {k: _json_safe(v) for k, v in vars(config).items()}
         with open(os.path.join(save_dir, "config.json"), "w") as f:
             json.dump(config_dict, f, indent=2)
 

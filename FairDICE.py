@@ -204,8 +204,41 @@ def save_model(train_state: TrainState, path: str):
     checkpointer = orbax.PyTreeCheckpointer()
     checkpointer.save(path, train_state)
 
-def load_model(path: str, config) -> TrainState:
+def _build_restore_args(target, device):
+    try:
+        from orbax.checkpoint import utils as oc_utils
+        return oc_utils.restore_args_from_target(
+            target, sharding=jax.sharding.SingleDeviceSharding(device)
+        )
+    except Exception:
+        pass
+
+    try:
+        from orbax.checkpoint import type_handlers as oc_type_handlers
+        array_restore_args = getattr(oc_type_handlers, "ArrayRestoreArgs", None)
+        if array_restore_args is None:
+            return None
+        sharding = jax.sharding.SingleDeviceSharding(device)
+        array_types = (jax.Array,) if hasattr(jax, "Array") else ()
+        if not array_types:
+            return None
+
+        def _map(x):
+            return array_restore_args(sharding=sharding) if isinstance(x, array_types) else None
+
+        return jax.tree_util.tree_map(_map, target)
+    except Exception:
+        return None
+
+
+def load_model(path: str, config, device=None) -> TrainState:
     checkpointer = orbax.PyTreeCheckpointer()
     train_state = init_train_state(config)
-    train_state = checkpointer.restore(path, item=train_state)
+    if device is None:
+        device = jax.devices()[0]
+    restore_args = _build_restore_args(train_state, device)
+    if restore_args is not None:
+        train_state = checkpointer.restore(path, item=train_state, restore_args=restore_args)
+    else:
+        train_state = checkpointer.restore(path, item=train_state)
     return train_state

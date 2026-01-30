@@ -1,5 +1,7 @@
 #!/bin/bash
 
+cd PEDA
+
 conda activate peda_env
 
 export MUJOCO_PY_MUJOCO_PATH="$HOME/.mujoco/mujoco210"

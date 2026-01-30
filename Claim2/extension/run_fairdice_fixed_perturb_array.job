@@ -1,0 +1,88 @@
+#!/bin/bash
+
+#SBATCH --job-name=fairdice_fix_mu
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem-per-cpu=6G
+#SBATCH --time=24:00:00
+#SBATCH --partition=gpu_mig
+#SBATCH --gpus=1
+#SBATCH --array=0-999%8
+#SBATCH --output=logs/slurm/fairdice_fix_mu_%A_%a.out
+
+set -euo pipefail
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd /home/scur0132/claim2/extension
+
+# Activate env
+source /sw/arch/RHEL9/EB_production/2025/software/Anaconda3/2025.06-1/etc/profile.d/conda.sh
+export MKL_INTERFACE_LAYER=GNU,LP64
+conda activate peda_env
+
+# MuJoCo/D4RL env vars
+export MUJOCO_PY_MUJOCO_PATH="$HOME/.mujoco/mujoco210"
+export MUJOCO_GL=egl
+export D4RL_SUPPRESS_IMPORT_ERROR=1
+export LD_LIBRARY_PATH="/usr/lib/nvidia:/usr/lib64/nvidia:$MUJOCO_PY_MUJOCO_PATH/bin:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+
+export CUDA_VISIBLE_DEVICES=0
+
+# Threading
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+mkdir -p logs/slurm results_mu_perturb
+
+TASKS_FILE="/home/scur0132/claim2/extension/mu_perturb_tasks.txt"
+
+if [ ! -f "$TASKS_FILE" ]; then
+  echo "[ERROR] tasks file not found: $TASKS_FILE"
+  exit 1
+fi
+
+# Count tasks (exclude header)
+NUM_TASKS=$(($(wc -l < "$TASKS_FILE") - 1))
+IDX=${SLURM_ARRAY_TASK_ID}
+if [ "$IDX" -lt 0 ] || [ "$IDX" -ge "$NUM_TASKS" ]; then
+  echo "[ERROR] SLURM_ARRAY_TASK_ID $IDX out of range 0..$((NUM_TASKS-1))"
+  exit 1
+fi
+
+# Read task line (skip header)
+LINE=$(tail -n +2 "$TASKS_FILE" | sed -n "$((IDX+1))p")
+ENV_NAME=$(echo "$LINE" | awk -F'\t' '{print $1}')
+STD=$(echo "$LINE" | awk -F'\t' '{print $2}')
+SEED=$(echo "$LINE" | awk -F'\t' '{print $3}')
+MU_INIT=$(echo "$LINE" | awk -F'\t' '{print $4}')
+
+if [ -z "$ENV_NAME" ] || [ -z "$STD" ] || [ -z "$SEED" ] || [ -z "$MU_INIT" ]; then
+  echo "[ERROR] Failed to parse task line: $LINE"
+  exit 1
+fi
+
+SAVE_PATH="/home/scur0132/claim2/extension/results_mu_perturb/std_${STD}"
+mkdir -p "$SAVE_PATH"
+
+python main.py \
+  --learner FairDICE_Fixed \
+  --divergence SOFT_CHI \
+  --env_name "$ENV_NAME" \
+  --quality expert \
+  --beta 0.1 \
+  --preference_dist uniform \
+  --eval_episodes 10 \
+  --batch_size 128 \
+  --hidden_dim 768 \
+  --num_layers 3 \
+  --total_train_steps 100000 \
+  --log_interval 1000 \
+  --normalize_reward True \
+  --seed "$SEED" \
+  --mu_init "$MU_INIT" \
+  --save_path "$SAVE_PATH"

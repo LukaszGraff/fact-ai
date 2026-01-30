@@ -1,0 +1,83 @@
+#!/bin/bash
+
+#SBATCH --job-name=fairdice_gpu
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem-per-cpu=6G
+#SBATCH --time=24:00:00
+#SBATCH --partition=gpu_mig
+#SBATCH --gpus=2
+#SBATCH --mem-per-cpu=12G
+#SBATCH --array=0-29%4
+#SBATCH --output=logs/slurm/fairdice_gpu_%A_%a.out
+
+set -euo pipefail
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+cd /home/scur0132/claim2/extension
+
+# Activate env
+source /sw/arch/RHEL9/EB_production/2025/software/Anaconda3/2025.06-1/etc/profile.d/conda.sh
+export MKL_INTERFACE_LAYER=GNU,LP64
+conda activate peda_env
+
+# MuJoCo/D4RL env vars
+export MUJOCO_PY_MUJOCO_PATH="$HOME/.mujoco/mujoco210"
+export MUJOCO_GL=egl
+export D4RL_SUPPRESS_IMPORT_ERROR=1
+export LD_LIBRARY_PATH="/usr/lib/nvidia:/usr/lib64/nvidia:$MUJOCO_PY_MUJOCO_PATH/bin:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+
+# Use GPU
+unset JAX_PLATFORMS
+unset JAX_PLATFORM_NAME
+export CUDA_VISIBLE_DEVICES=0
+
+# Threading
+export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+mkdir -p logs/slurm results
+
+ENVS=(
+  "MO-Hopper-v2"
+  "MO-Walker2d-v2"
+  "MO-Swimmer-v2"
+  "MO-HalfCheetah-v2"
+  "MO-Ant-v2"
+  "MO-Hopper-v3"
+)
+SEEDS=(1 2 3 4 5)
+
+IDX=${SLURM_ARRAY_TASK_ID}
+ENV_IDX=$((IDX / 5))
+SEED_IDX=$((IDX % 5))
+
+ENV_NAME=${ENVS[$ENV_IDX]}
+SEED=${SEEDS[$SEED_IDX]}
+
+if [ -z "$ENV_NAME" ] || [ -z "$SEED" ]; then
+  echo "[ERROR] Invalid task mapping: IDX=$IDX"
+  exit 1
+fi
+
+# Single-setting run per env x seed
+python main.py \
+  --learner FairDICE \
+  --divergence SOFT_CHI \
+  --env_name "$ENV_NAME" \
+  --quality expert \
+  --beta 0.1 \
+  --preference_dist uniform \
+  --eval_episodes 10 \
+  --batch_size 32 \
+  --hidden_dim 512 \
+  --num_layers 3 \
+  --total_train_steps 100000 \
+  --log_interval 1000 \
+  --normalize_reward True \
+  --seed "$SEED"

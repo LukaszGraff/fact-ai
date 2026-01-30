@@ -1,0 +1,22 @@
+# Core
+numpy
+pandas
+matplotlib
+tqdm
+
+# RL + environments
+gym==0.21.0
+mujoco==2.2.1
+mujoco-py==2.1.2.14
+
+# JAX stack
+jax
+flax
+optax
+orbax-checkpoint
+tensorflow_probability
+typing-extensions
+
+# Logging / utilities
+wandb
+codecarbon

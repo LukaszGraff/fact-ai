@@ -1,0 +1,266 @@
+#!/bin/bash
+
+#SBATCH --partition=rome
+#SBATCH --job-name=fourroom_sweep
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=04:00:00
+#SBATCH --output=logs/slurm/%x_%j.out
+
+#SBATCH --ear=on
+#SBATCH --ear-policy=monitoring
+#SBATCH --ear-verbose=1
+
+set -euo pipefail
+
+# ------------------------------------------------------------
+# Single-file sweep launcher + worker.
+#
+# Usage:
+#   sbatch four-room-sweep-and-vis.job
+#
+# What it does:
+#  1) Launcher mode (default): submits an array of 1000 training jobs
+#     and then submits an aggregate visualization job depending on completion.
+#  2) Worker mode (MODE=train): trains one seed based on SLURM_ARRAY_TASK_ID.
+#  3) Worker mode (MODE=aggregate): aggregates all saved models into one heatmap.
+# ------------------------------------------------------------
+
+MODE=${MODE:-launcher}
+SWEEP_ID=${SWEEP_ID:-}
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+# Avoid leaking launcher conda state into array tasks.
+unset CONDA_PREFIX CONDA_SHLVL CONDA_DEFAULT_ENV
+source "$EBROOTANACONDA3/etc/profile.d/conda.sh"
+conda activate fairdice
+
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
+
+export MUJOCO_PY_MUJOCO_PATH="$HOME/.mujoco/mujoco210"
+export MUJOCO_GL=egl
+export D4RL_SUPPRESS_IMPORT_ERROR=1
+export LD_LIBRARY_PATH="/usr/lib/nvidia:/usr/lib64/nvidia:$MUJOCO_PY_MUJOCO_PATH/bin:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+# Force JAX to use CPU on non-GPU nodes.
+export JAX_PLATFORMS=cpu
+
+# --------- Sweep config ---------
+ENV_NAME="MO-FourRoom-v2"
+QUALITY="amateur"
+PREF_DIST="uniform"
+DIVERGENCE="CHI"
+BETA="0.01"
+GAMMA="0.99"
+BATCH_SIZE="128"
+HIDDEN_DIM="256"
+NUM_LAYERS="2"
+TOTAL_TRAIN_STEPS="100000"
+LOG_INTERVAL="1000"
+EVAL_EPISODES="1"
+MAX_SEQ_LEN="400"
+POLICY_LR="3e-4"
+NU_LR="3e-4"
+MU_LR="3e-4"
+NORMALIZE_REWARD="False"
+SAVE_MODEL_MODE="last"   # best_nsw or last
+
+# --------- Hyperparameter sweep config ---------
+# Edit this block to change what is swept.
+# Example:
+#   SEED_COUNT=10
+#   SWEEP_BETAS_STR="0.001 0.01 0.1"
+#   SWEEP_HIDDEN_DIMS_STR="128 256"
+#   SWEEP_BATCH_SIZES_STR="64 128 256"
+SEED_COUNT=10
+SWEEP_BETAS_STR="0.001 0.01 0.1"
+SWEEP_HIDDEN_DIMS_STR="128 256"
+SWEEP_BATCH_SIZES_STR="64 128 256"
+
+read -r -a SWEEP_BETAS <<< "$SWEEP_BETAS_STR"
+read -r -a SWEEP_HIDDEN_DIMS <<< "$SWEEP_HIDDEN_DIMS_STR"
+read -r -a SWEEP_BATCH_SIZES <<< "$SWEEP_BATCH_SIZES_STR"
+
+# Stage dataset into node-local scratch
+TMPDIR="${TMPDIR:-/tmp/$USER}"
+DATA_SRC="$SLURM_SUBMIT_DIR/data"
+DATA_DST="$TMPDIR/data"
+mkdir -p "$DATA_DST"
+if [[ -d "$DATA_SRC/$ENV_NAME" ]]; then
+  rsync -a "$DATA_SRC/$ENV_NAME/" "$DATA_DST/$ENV_NAME/"
+  export DATA_ROOT="$TMPDIR"
+fi
+
+# Data generation (run once before sweep)
+GENERATE_DATA=${GENERATE_DATA:-0}
+NUM_TRAJ=${NUM_TRAJ:-300}
+DATA_MAX_STEPS=${DATA_MAX_STEPS:-400}
+BEHAVIOR=${BEHAVIOR:-optimal_mix}
+GOAL_MIX=${GOAL_MIX:-0.6,0.2,0.2}
+EPS_OPTIMAL=${EPS_OPTIMAL:-0.3}
+
+# Aggregate visualization
+EPISODES_PER_MODEL=${EPISODES_PER_MODEL:-100}
+AGG_MAX_STEPS=${AGG_MAX_STEPS:-100}
+AGG_STOCHASTIC=${AGG_STOCHASTIC:-1}   # 1 to sample actions, 0 for argmax
+PER_SETTING_AGGREGATE=${PER_SETTING_AGGREGATE:-1}  # 1 to render per-hparam setting
+
+# Parallelism for the array
+ARRAY_PARALLELISM=${ARRAY_PARALLELISM:-1000}
+
+if [[ "$MODE" == "launcher" ]]; then
+  if [[ -z "$SWEEP_ID" ]]; then
+    SWEEP_ID="sweep_$(date +%Y%m%d_%H%M%S)"
+  fi
+
+  echo "Launching sweep: $SWEEP_ID"
+
+  if [[ "$GENERATE_DATA" == "1" ]]; then
+    echo "Generating offline data once (num_trajectories=$NUM_TRAJ)..."
+    python generate_fourroom_data.py \
+      --env_name "$ENV_NAME" \
+      --num_trajectories "$NUM_TRAJ" \
+      --quality "$QUALITY" \
+      --preference_dist "$PREF_DIST" \
+      --max_steps "$DATA_MAX_STEPS"
+  fi
+
+  NUM_BETAS=${#SWEEP_BETAS[@]}
+  NUM_HIDDEN_DIMS=${#SWEEP_HIDDEN_DIMS[@]}
+  NUM_BATCH_SIZES=${#SWEEP_BATCH_SIZES[@]}
+  SWEEP_GRID_SIZE=$((NUM_BETAS * NUM_HIDDEN_DIMS * NUM_BATCH_SIZES))
+  ARRAY_SIZE=${ARRAY_SIZE:-$((SEED_COUNT * SWEEP_GRID_SIZE))}
+
+  TRAIN_JOB_ID=$(sbatch --parsable \
+    --array=0-$((ARRAY_SIZE-1))%$ARRAY_PARALLELISM \
+    --export=MODE=train,SWEEP_ID="$SWEEP_ID" \
+    job-files/four-room-sweep-and-vis.job)
+
+  echo "Submitted training array job: $TRAIN_JOB_ID"
+
+  VIS_JOB_ID=$(sbatch --parsable \
+    --dependency=afterok:${TRAIN_JOB_ID} \
+    --export=MODE=aggregate,SWEEP_ID="$SWEEP_ID" \
+    job-files/four-room-sweep-and-vis.job)
+
+  echo "Submitted aggregate job: $VIS_JOB_ID (depends on $TRAIN_JOB_ID)"
+  echo "Sweep directory: ./results/$SWEEP_ID"
+  exit 0
+fi
+
+if [[ -z "$SWEEP_ID" ]]; then
+  echo "SWEEP_ID must be set (launcher sets it automatically)." >&2
+  exit 1
+fi
+
+RESULTS_DIR="./results/$SWEEP_ID"
+mkdir -p "$RESULTS_DIR"
+
+if [[ "$MODE" == "train" ]]; then
+  NUM_BETAS=${#SWEEP_BETAS[@]}
+  NUM_HIDDEN_DIMS=${#SWEEP_HIDDEN_DIMS[@]}
+  NUM_BATCH_SIZES=${#SWEEP_BATCH_SIZES[@]}
+  SWEEP_GRID_SIZE=$((NUM_BETAS * NUM_HIDDEN_DIMS * NUM_BATCH_SIZES))
+
+  TASK_ID=${SLURM_ARRAY_TASK_ID:-0}
+  SEED_INDEX=$((TASK_ID % SEED_COUNT))
+  SWEEP_INDEX=$((TASK_ID / SEED_COUNT))
+
+  if [[ "$SWEEP_INDEX" -ge "$SWEEP_GRID_SIZE" ]]; then
+    echo "Task $TASK_ID exceeds sweep grid size ($SWEEP_GRID_SIZE) with SEED_COUNT=$SEED_COUNT" >&2
+    exit 1
+  fi
+
+  BETA_INDEX=$((SWEEP_INDEX % NUM_BETAS))
+  HIDDEN_DIM_INDEX=$(((SWEEP_INDEX / NUM_BETAS) % NUM_HIDDEN_DIMS))
+  BATCH_INDEX=$((SWEEP_INDEX / (NUM_BETAS * NUM_HIDDEN_DIMS)))
+
+  BETA="${SWEEP_BETAS[$BETA_INDEX]}"
+  HIDDEN_DIM="${SWEEP_HIDDEN_DIMS[$HIDDEN_DIM_INDEX]}"
+  BATCH_SIZE="${SWEEP_BATCH_SIZES[$BATCH_INDEX]}"
+  SEED="$SEED_INDEX"
+  RUN_NAME="seed_${SEED}_beta_${BETA}_h${HIDDEN_DIM}_bs${BATCH_SIZE}"
+
+  echo "Training seed=$SEED beta=$BETA hidden_dim=$HIDDEN_DIM batch_size=$BATCH_SIZE -> $RESULTS_DIR/$RUN_NAME"
+
+  python main_fourroom.py \
+    --mode train \
+    --env_name "$ENV_NAME" \
+    --learner FairDICE \
+    --quality "$QUALITY" \
+    --preference_dist "$PREF_DIST" \
+    --divergence "$DIVERGENCE" \
+    --beta "$BETA" \
+    --gamma "$GAMMA" \
+    --batch_size "$BATCH_SIZE" \
+    --hidden_dim "$HIDDEN_DIM" \
+    --num_layers "$NUM_LAYERS" \
+    --total_train_steps "$TOTAL_TRAIN_STEPS" \
+    --log_interval "$LOG_INTERVAL" \
+    --eval_episodes "$EVAL_EPISODES" \
+    --max_seq_len "$MAX_SEQ_LEN" \
+    --policy_lr "$POLICY_LR" \
+    --nu_lr "$NU_LR" \
+    --mu_lr "$MU_LR" \
+    --normalize_reward "$NORMALIZE_REWARD" \
+    --seed "$SEED" \
+    --save_path "$RESULTS_DIR" \
+    --run_name "$RUN_NAME" \
+    --save_model_mode "$SAVE_MODEL_MODE"
+
+  exit 0
+fi
+
+if [[ "$MODE" == "aggregate" ]]; then
+  echo "Aggregating models from $RESULTS_DIR"
+
+  STOCH_FLAG=""
+  if [[ "$AGG_STOCHASTIC" == "1" ]]; then
+    STOCH_FLAG="--stochastic"
+  fi
+
+  python utility-scripts/visualize_fourroom.py \
+    --sweep_dir "$RESULTS_DIR" \
+    --env_name "$ENV_NAME" \
+    --episodes_per_model "$EPISODES_PER_MODEL" \
+    --max_steps "$AGG_MAX_STEPS" \
+    $STOCH_FLAG \
+    --output "$RESULTS_DIR/aggregate_policy_heatmap.png"
+
+  if [[ "$PER_SETTING_AGGREGATE" == "1" ]]; then
+    echo "Aggregating per hyperparameter setting..."
+    while IFS= read -r run_dir; do
+      run_base=$(basename "$run_dir")
+      if [[ "$run_base" =~ ^seed_[0-9]+_beta_([^_]+)_h([0-9]+)_bs([0-9]+)$ ]]; then
+        beta="${BASH_REMATCH[1]}"
+        hidden_dim="${BASH_REMATCH[2]}"
+        batch_size="${BASH_REMATCH[3]}"
+        tag="beta_${beta}_h${hidden_dim}_bs${batch_size}"
+        tmp_dir="$RESULTS_DIR/aggregate_tmp/$tag"
+        mkdir -p "$tmp_dir"
+        run_dir_abs=$(readlink -f "$run_dir")
+        ln -sfn "$run_dir_abs" "$tmp_dir/$run_base"
+      fi
+    done < <(find "$RESULTS_DIR" -maxdepth 1 -type d -name "seed_*" | sort)
+
+    for tmp_dir in "$RESULTS_DIR"/aggregate_tmp/*; do
+      [[ -d "$tmp_dir" ]] || continue
+      tag=$(basename "$tmp_dir")
+      python utility-scripts/visualize_fourroom.py \
+        --sweep_dir "$tmp_dir" \
+        --env_name "$ENV_NAME" \
+        --episodes_per_model "$EPISODES_PER_MODEL" \
+        --max_steps "$AGG_MAX_STEPS" \
+        $STOCH_FLAG \
+        --output "$RESULTS_DIR/aggregate_${tag}.png"
+    done
+  fi
+
+  echo "Done. Output: $RESULTS_DIR/aggregate_policy_heatmap.png"
+  exit 0
+fi
+
+echo "Unknown MODE=$MODE" >&2
+exit 1

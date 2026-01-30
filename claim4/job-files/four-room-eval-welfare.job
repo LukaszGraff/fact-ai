@@ -1,0 +1,45 @@
+#!/bin/bash
+
+#SBATCH --partition=rome
+#SBATCH --job-name=fourroom_eval_welfare
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=08:00:00
+#SBATCH --output=logs/slurm/%x_%j.out
+
+#SBATCH --ear=on
+#SBATCH --ear-policy=monitoring
+#SBATCH --ear-verbose=1
+
+set -euo pipefail
+
+SWEEP_ID=${SWEEP_ID:-}
+EPISODES=${EPISODES:-30}
+MAX_STEPS=${MAX_STEPS:-400}
+
+if [[ -z "$SWEEP_ID" ]]; then
+  echo "SWEEP_ID must be set (e.g. SWEEP_ID=sweep_20260123_160808)." >&2
+  exit 1
+fi
+
+module purge
+module load 2025
+module load Anaconda3/2025.06-1
+
+unset CONDA_PREFIX CONDA_SHLVL CONDA_DEFAULT_ENV
+source "$EBROOTANACONDA3/etc/profile.d/conda.sh"
+conda activate fairdice
+
+cd "${SLURM_SUBMIT_DIR:-$PWD}"
+
+export MUJOCO_PY_MUJOCO_PATH="$HOME/.mujoco/mujoco210"
+export MUJOCO_GL=egl
+export D4RL_SUPPRESS_IMPORT_ERROR=1
+export LD_LIBRARY_PATH="/usr/lib/nvidia:/usr/lib64/nvidia:$MUJOCO_PY_MUJOCO_PATH/bin:$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+export JAX_PLATFORMS=cpu
+
+python utility-scripts/evaluate_sweep_welfare.py \
+  --sweep_dir "./results/$SWEEP_ID" \
+  --episodes "$EPISODES" \
+  --max_steps "$MAX_STEPS" \
+  --group_by "mix"

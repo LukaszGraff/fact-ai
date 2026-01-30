@@ -57,6 +57,8 @@ This script launches FairDICE training/evaluation runs across multiple MuJoCo mu
 bash FairDICE/run_all.sh
 ```
 
+If you are working on Snellius, you can also use `sbatch FairDICE/run_all.job`.
+
 ### 2) Visualize FairDICE results (NSW vs. beta)
 
 `FairDICE/visualize.py` searches your run directory recursively for folders that contain an `eval/` subdir with `normalized_returns_step_*.npy`, then aggregates Nash Social Welfare (NSW) across seeds and plots **Amateur vs Expert** for each beta. 
@@ -100,6 +102,8 @@ This script runs baseline training/eval across:
 ```bash
 bash PEDA/train_all.sh
 ```
+
+If you are working on Snellius, you can also use `sbatch PEDA/train_all.job`.
 
 ### 5) Make comparison plots (baselines + FairDICE)
 
